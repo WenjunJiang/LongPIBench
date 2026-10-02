@@ -1,0 +1,38 @@
+=== urchade/gliner_multi_pii-v1 (load 15.8 s)
+--- English long sentence: 727 chars, 11 entities, 347 ms
+    person               1.00  Sarah Johnson
+    date of birth        1.00  14 March 1987
+    address              1.00  742 Evergreen Terrace, Springfield
+    phone number         1.00  +1 (555) 123-4567
+    email                1.00  sarah.johnson@example.com
+    passport number      1.00  X12345678
+    bank account number  1.00  0123456789
+    organization         0.99  First National Bank
+    credit card number   1.00  4532 0151 1283 0366
+    medical condition    1.00  type 2 diabetes
+    person               0.99  Dr. Michael Chen
+--- Korean sentence: 129 chars, 5 entities, 140 ms
+    person               0.72  김민수
+    phone number         0.99  010-1234-5678로
+    email                0.99  minsu.kim@example.co.kr로
+    address              0.99  서울특별시 강남구 테헤란로 123이며
+    medical condition    0.98  당뇨
+=== knowledgator/gliner-pii-base-v1.0 (load 14.1 s)
+--- English long sentence: 727 chars, 11 entities, 247 ms
+    person               0.69  Sarah Johnson
+    date of birth        0.50  14 March 1987
+    address              0.86  742 Evergreen Terrace, Springfield
+    phone number         0.97  +1 (555) 123-4567
+    email                0.91  sarah.johnson@example.com
+    passport number      1.00  X12345678
+    bank account number  0.93  0123456789
+    organization         0.75  First National Bank
+    credit card number   0.99  4532 0151 1283 0366
+    medical condition    0.88  type 2 diabetes
+    person               0.51  Dr. Michael Chen
+--- Korean sentence: 129 chars, 5 entities, 133 ms
+    person               0.43  김민수 님이
+    phone number         0.85  010-1234-5678로
+    email                0.96  minsu.kim@example.co.kr로
+    address              0.49  123이며
+    medical condition    0.55  당뇨 진단을
