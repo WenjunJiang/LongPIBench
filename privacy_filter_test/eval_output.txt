@@ -1,0 +1,55 @@
+summary:
+  field                        value  
+  ---------------------------  -------
+  examples                     5      
+  tokens                       145    
+  windows                      5      
+  window_tokens                145    
+  padded_window_tokens         145    
+  elapsed_s                    13.9925
+  tokens_per_s                 10.3627
+  window_tokens_per_s          10.3627
+  padded_window_tokens_per_s   10.3627
+  eval_mode                    typed  
+  inference_tokens_per_second  13.1707
+  loss                         0.4325 
+  token_accuracy               0.9448 
+
+detection_metrics:
+  metric                    value 
+  ------------------------  ------
+  detection.precision       0.9697
+  detection.recall          1.0000
+  detection.f1              0.9846
+  detection.f2              0.9938
+  detection.span.precision  0.9375
+  detection.span.recall     0.8571
+  detection.span.f1         0.8955
+  detection.span.f2         0.8721
+
+timings:
+  stage                  seconds 
+  ---------------------  --------
+  startup                2.9793s 
+  window_stage_wall      11.0093s
+  input_pipeline         0.0036s 
+  model_forward          11.0044s
+  score_stitch           0.0012s 
+  metrics_prepare        0.0007s 
+  decode                 0.0035s 
+  prediction_assembly    0.0001s 
+  metrics_accuracy       0.0001s 
+  metrics_finalize       0.0001s 
+  metrics_total          0.0047s 
+  prediction_write       0.0000s 
+  eval_core_total        11.0140s
+  eval_total_with_write  11.0140s
+  overall_wall           13.9937s
+
+throughput:
+  metric                            tokens_per_second
+  --------------------------------  -----------------
+  inference_only_tokens_per_second  13.1707          
+  model_forward_tokens_per_second   13.1765          
+  eval_total_tokens_per_second      13.1651          
+throughput_note: inference_only_tokens_per_second uses model_forward + score_stitch + decode + prediction_assembly.

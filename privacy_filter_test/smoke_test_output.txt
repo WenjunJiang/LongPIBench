@@ -1,0 +1,20 @@
+model load + warm-up: 3.6 s
+
+   1658 ms | Alice was born on 1990-01-02.
+          spans: [["private_date", "1990-01-02"]]
+
+   5612 ms | Hi, I'm John Smith. Call me at +1 415-555-0198 or email john.smith@...
+          spans: [["private_person", "John Smith"], ["private_phone", "+1 415-555-0198"], ["private_email", "john.smith@example.com"], ["account_number", "4111 1111 1111 1111"], ["private_address", "221B Baker Street, London."]]
+
+   3109 ms | 안녕하세요, 저는 김민수입니다. 전화번호는 010-1234-5678이고 이메일은 minsu.kim@example.co.k...
+          spans: [["private_person", "김민수"], ["private_phone", "010-1234-5678"], ["private_email", "minsu.kim@example.co.kr"], ["private_address", "서울특별시 강남구 테헤란로 123"]]
+
+   1149 ms | I was diagnosed with depression last March and my therapist is Dr. ...
+          spans: [["private_date", "last March"], ["private_person", "Dr. Lee"]]
+
+   2423 ms | Use API key sk-test-51HxQ2eZvKYlo2C9a8bT3 for the staging server.
+          spans: [["secret", "sk-test-51HxQ2eZvKYlo2C9a8bT3"]]
+
+  86152 ms | [long doc, 7662 chars]
+          spans: [["private_person", "Maria Garcia"], ["private_email", "maria.garcia@example.org"], ["private_phone", "+44 20 7946 0958"]]
+
