@@ -1,0 +1,3 @@
+argmax : ['B-injection', 'I-injection', 'O', 'I-injection', 'E-health', 'O']
+viterbi: ['B-injection', 'I-injection', 'I-injection', 'I-injection', 'E-injection', 'O']
+spans (type, start_tok, end_tok): [('injection', 0, 5)]
