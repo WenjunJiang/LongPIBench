@@ -1,0 +1,66 @@
+
+=== enter-span bias +2.0 ===
+  [no PII] 2 span(s) [('private_person', 'IBAN'), ('account_number', 'DE89 3704 0044 0532 0130 00')]
+  [no PII] 0 span(s) []
+  [no PII] 0 span(s) []
+  [no PII] 0 span(s) []
+  [no PII] 0 span(s) []
+  [no PII] 0 span(s) []
+  [PII]    3 span(s) [('private_person', 'Daniel Whitfield'), ('private_email', 'daniel.w@meridiancap.com'), ('private_phone', '+1 415-555-0123')]
+  [PII]    3 span(s) [('secret', 'Tr0ub4dor&3'), ('secret', 'AKIA4EXAMPLE7QXZ2LMN'), ('private_date', '03/07/91')]
+  -> spans on PII-free texts: 2
+
+=== enter-span bias +0.0 ===
+  [no PII] 2 span(s) [('private_person', 'IBAN'), ('account_number', 'DE89 3704 0044 0532 0130 00')]
+  [no PII] 0 span(s) []
+  [no PII] 0 span(s) []
+  [no PII] 0 span(s) []
+  [no PII] 0 span(s) []
+  [no PII] 0 span(s) []
+  [PII]    3 span(s) [('private_person', 'Daniel Whitfield'), ('private_email', 'daniel.w@meridiancap.com'), ('private_phone', '+1 415-555-0123')]
+  [PII]    3 span(s) [('secret', 'Tr0ub4dor&3'), ('secret', 'AKIA4EXAMPLE7QXZ2LMN'), ('private_date', '03/07/91')]
+  -> spans on PII-free texts: 2
+
+=== enter-span bias -2.0 ===
+  [no PII] 2 span(s) [('private_person', 'IBAN'), ('account_number', 'DE89 3704 0044 0532 0130 00')]
+  [no PII] 0 span(s) []
+  [no PII] 0 span(s) []
+  [no PII] 0 span(s) []
+  [no PII] 0 span(s) []
+  [no PII] 0 span(s) []
+  [PII]    3 span(s) [('private_person', 'Daniel Whitfield'), ('private_email', 'daniel.w@meridiancap.com'), ('private_phone', '+1 415-555-0123')]
+  [PII]    3 span(s) [('secret', 'Tr0ub4dor&3'), ('secret', 'AKIA4EXAMPLE7QXZ2LMN'), ('private_date', '03/07/91')]
+  -> spans on PII-free texts: 2
+
+=== enter-span bias -4.0 ===
+  [no PII] 2 span(s) [('private_person', 'IBAN'), ('account_number', 'DE89 3704 0044 0532 0130 00')]
+  [no PII] 0 span(s) []
+  [no PII] 0 span(s) []
+  [no PII] 0 span(s) []
+  [no PII] 0 span(s) []
+  [no PII] 0 span(s) []
+  [PII]    3 span(s) [('private_person', 'Daniel Whitfield'), ('private_email', 'daniel.w@meridiancap.com'), ('private_phone', '+1 415-555-0123')]
+  [PII]    3 span(s) [('secret', 'Tr0ub4dor&3'), ('secret', 'AKIA4EXAMPLE7QXZ2LMN'), ('private_date', '03/07/91')]
+  -> spans on PII-free texts: 2
+
+=== enter-span bias -10.0 ===
+  [no PII] 2 span(s) [('private_person', 'IBAN'), ('account_number', 'DE89 3704 0044 0532 0130 00')]
+  [no PII] 0 span(s) []
+  [no PII] 0 span(s) []
+  [no PII] 0 span(s) []
+  [no PII] 0 span(s) []
+  [no PII] 0 span(s) []
+  [PII]    3 span(s) [('private_person', 'Daniel Whitfield'), ('private_email', 'daniel.w@meridiancap.com'), ('private_phone', '+1 415-555-0123')]
+  [PII]    3 span(s) [('secret', 'Tr0ub4dor&3'), ('secret', 'AKIA4EXAMPLE7QXZ2LMN'), ('private_date', '03/07/91')]
+  -> spans on PII-free texts: 2
+
+=== enter-span bias -20.0 ===
+  [no PII] 1 span(s) [('account_number', 'DE89 3704 0044 0532 0130 00')]
+  [no PII] 0 span(s) []
+  [no PII] 0 span(s) []
+  [no PII] 0 span(s) []
+  [no PII] 0 span(s) []
+  [no PII] 0 span(s) []
+  [PII]    3 span(s) [('private_person', 'Daniel Whitfield'), ('private_email', 'daniel.w@meridiancap.com'), ('private_phone', '+1 415-555-0123')]
+  [PII]    3 span(s) [('secret', 'Tr0ub4dor&3'), ('secret', 'AKIA4EXAMPLE7QXZ2LMN'), ('private_date', '03/07/91')]
+  -> spans on PII-free texts: 1
