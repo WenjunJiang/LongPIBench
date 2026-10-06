@@ -1,0 +1,18 @@
+
+TEXT: Contact Dr. Maria del Carmen Rodríguez-Fernández at maria.rf@clinic-example.org or ext. 4471.
+  viterbi: [('private_person', 'Dr. Maria del Carmen Rodríguez-Fernández'), ('private_email', 'maria.rf@clinic-example.org'), ('private_phone', 'ext. 4471')]
+  argmax : [('private_person', 'Dr. Maria del Carmen Rodríguez-Fernández'), ('private_email', 'maria.rf@clinic-example.org'), ('private_phone', 'ext. 4471')]
+
+TEXT: Wire to IBAN DE89 3704 0044 0532 0130 00, ref inv-2026/0912, attn J. P. van der Berg, 14 Rue de la Paix 75002 Paris.
+  viterbi: [('private_person', 'IBAN'), ('account_number', 'DE89 3704 0044 0532 0130 00'), ('account_number', 'inv-2026/0912'), ('private_person', 'J. P. van der Berg'), ('private_address', '14 Rue de la Paix 75002 Paris')]
+  argmax : [('private_person', 'IBAN'), ('account_number', 'DE89 3704 0044 0532 0130 00'), ('account_number', 'inv-2026/0912'), ('private_person', 'J. P. van der Berg'), ('private_address', '14 Rue de la Paix 75002 Paris')]
+
+TEXT: my pw is Tr0ub4dor&3 and the backup key is AKIA4EXAMPLE7QXZ2LMN, born 03/07/91 in Busan
+  viterbi: [('secret', 'Tr0ub4dor&3'), ('secret', 'AKIA4EXAMPLE7QXZ2LMN'), ('private_date', '03/07/91')]
+  argmax : [('secret', 'Tr0ub4dor&3'), ('secret', 'AKIA4EXAMPLE7QXZ2LM'), ('account_number', 'N'), ('private_date', '03/07/91')]
+  per-token argmax tags (token -> tag):
+    'my':O | ' pw':O | ' is':O | ' Tr':B-secret | '0':I-secret | 'ub':I-secret | '4':I-secret | 'dor':I-secret | '&':I-secret | '3':E-secret | ' and':O | ' the':O | ' backup':O | ' key':O | ' is':O | ' AK':B-secret | 'IA':I-secret | '4':I-secret | 'EX':I-secret | 'AMPLE':I-secret | '7':I-secret | 'Q':I-secret | 'XZ':I-secret | '2':I-secret | 'LM':I-secret | 'N':E-account_number | ',':O | ' born':O | ' ':O | '03':B-private_date | '/':I-private_date | '07':I-private_date | '/':I-private_date | '91':E-private_date | ' in':O | ' Bus':O | 'an':O
+
+TEXT: Call 010 - 9876 - 5432 tomorrow, ask for Kim Min-jun (김민준), address 서울시 강남구 테헤란로 152
+  viterbi: [('private_phone', '010 - 9876 - 5432'), ('private_person', 'Kim Min-jun (김민준),'), ('private_address', '서울시 강남구 테헤란로 152')]
+  argmax : [('private_phone', '010 - 9876 - 5432'), ('private_person', 'Kim Min-jun (김민준),'), ('private_address', '서울시 강남구 테헤란로 152')]
