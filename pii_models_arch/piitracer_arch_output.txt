@@ -1,0 +1,67 @@
+[transformers] A new version of the following files was downloaded from https://huggingface.co/perplexity-ai/PII-Tracer:
+- modeling_pii_masking.py
+. Make sure to double-check they do not contain any added malicious code. To avoid downloading new versions of the code file, you can pin a revision.
+
+======== config (selected) ========
+{'hidden_size': 1024, 'num_token_labels': 37, 'max_seq_len': 4096, 'viterbi_b_bias': 0.0, 'viterbi_e_bias': 0.0, 'transformers_version': '5.16.1', 'architectures': ['PiiMaskingModel'], 'output_hidden_states': False, 'return_dict': True, 'dtype': 'bfloat16', 'chunk_size_feed_forward': 0, 'is_encoder_decoder': False, 'id2label': {0: 'O', 1: 'B-private_person', 2: 'I-private_person', 3: 'E-private_person', 4: 'S-private_person', 5: 'B-private_email', 6: 'I-private_email', 7: 'E-private_email', 8: 'S-private_email', 9: 'B-private_phone', 10: 'I-private_phone', 11: 'E-private_phone', 12: 'S-private_phone', 13: 'B-private_address', 14: 'I-private_address', 15: 'E-private_address', 16: 'S-private_address', 17: 'B-private_url', 18: 'I-private_url', 19: 'E-private_url', 20: 'S-private_url', 21: 'B-private_date', 22: 'I-private_date', 23: 'E-private_date', 24: 'S-private_date', 25: 'B-account_number', 26: 'I-account_number', 27: 'E-account_number', 28: 'S-account_number', 29: 'B-secret', 30: 'I-secret', 31: 'E-secret', 32: 'S-secret', 33: 'B-other_pii', 34: 'I-other_pii', 35: 'E-other_pii', 36: 'S-other_pii'}, 'label2id': {'O': 0, 'B-private_person': 1, 'I-private_person': 2, 'E-private_person': 3, 'S-private_person': 4, 'B-private_email': 5, 'I-private_email': 6, 'E-private_email': 7, 'S-private_email': 8, 'B-private_phone': 9, 'I-private_phone': 10, 'E-private_phone': 11, 'S-private_phone': 12, 'B-private_address': 13, 'I-private_address': 14, 'E-private_address': 15, 'S-private_address': 16, 'B-private_url': 17, 'I-private_url': 18, 'E-private_url': 19, 'S-private_url': 20, 'B-private_date': 21, 'I-private_date': 22, 'E-private_date': 23, 'S-private_date': 24, 'B-account_number': 25, 'I-account_number': 26, 'E-account_number': 27, 'S-account_number': 28, 'B-secret': 29, 'I-secret': 30, 'E-secret': 31, 'S-secret': 32, 'B-other_pii': 33, 'I-other_pii': 34, 'E-other_pii': 35, 'S-other_pii': 36}, 'problem_type': None, '_name_or_path': 'perplexity-ai/PII-Tracer', 'auto_map': {'AutoConfig': 'modeling_pii_masking.PiiMaskingConfig', 'AutoModel': 'modeling_pii_masking.PiiMaskingModel'}, 'model_type': 'pii_masking', 'loss_weight_token_cls': 1.5, 'loss_weight_sensitivity': 0.3, 'dropout': 0.1, 'freeze_backbone': False, 'output_attentions': False}
+backbone: {'model_type': 'qwen3', 'hidden_size': 1024, 'num_hidden_layers': 28, 'num_attention_heads': 16, 'num_key_value_heads': 8, 'vocab_size': 151936, 'is_causal': False}
+
+======== module tree ========
+backbone           Qwen3Model             params=596,049,920
+token_cls_head     Linear                 params=37,925
+sensitivity_head   Linear                 params=1,025
+viterbi            ViterbiDecoder         params=0
+total params: 596,088,870
+
+======== raw model output (one forward pass) ========
+  logits: (1, 84, 37)
+  sensitivity_logits: (1,)
+  last_hidden_state: (1, 84, 1024)
+  predict wall time on CPU: 8.66s | sensitivity=0.020533330738544464
+
+======== decoded -> JSON (span objects serialized by caller) ========
+[
+  {
+    "start": 8,
+    "end": 24,
+    "label": "private_person",
+    "score": 0.9999629259109497,
+    "text": "Daniel Whitfield"
+  },
+  {
+    "start": 31,
+    "end": 44,
+    "label": "private_date",
+    "score": 0.9999345541000366,
+    "text": "14 March 1987"
+  },
+  {
+    "start": 58,
+    "end": 82,
+    "label": "private_email",
+    "score": 0.9999781847000122,
+    "text": "daniel.w@meridiancap.com"
+  },
+  {
+    "start": 86,
+    "end": 101,
+    "label": "private_phone",
+    "score": 0.9999555349349976,
+    "text": "+1 415-555-0123"
+  },
+  {
+    "start": 117,
+    "end": 136,
+    "label": "account_number",
+    "score": 0.9999686479568481,
+    "text": "4485-2210-9931-0042"
+  },
+  {
+    "start": 151,
+    "end": 176,
+    "label": "private_address",
+    "score": 0.999994158744812,
+    "text": "221B Baker Street, London"
+  }
+]
+mask(): Hi, I'm [PRIVATE_PERSON], born [PRIVATE_DATE]. Reach me at [PRIVATE_EMAIL] or [PRIVATE_PHONE]; my account is [ACCOUNT_NUMBER] and I live at [PRIVATE_ADDRESS].

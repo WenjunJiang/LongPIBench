@@ -1,0 +1,78 @@
+Fetching 13 files:   8%|▊         | 1/13 [00:00<00:05,  2.22it/s]Fetching 13 files:  15%|█▌        | 2/13 [00:00<00:04,  2.23it/s]Fetching 13 files:  54%|█████▍    | 7/13 [00:01<00:00,  8.33it/s]Fetching 13 files:  69%|██████▉   | 9/13 [00:01<00:00,  9.54it/s]Fetching 13 files: 100%|██████████| 13/13 [00:14<00:00,  1.67s/it]Fetching 13 files: 100%|██████████| 13/13 [00:14<00:00,  1.14s/it]
+
+======== config (selected) ========
+model_name         microsoft/deberta-v3-large
+span_mode          markerV0
+max_width          12
+max_len            384
+hidden_size        512
+dropout            0.4
+fine_tune          True
+subtoken_pooling   first
+ent_token          <<ENT>>
+sep_token          <<SEP>>
+class_token_index  128002
+
+======== module tree ========
+token_rep_layer        Encoder                      params=434,438,656
+rnn                    LstmSeq2SeqEncoder           params=1,576,960
+span_rep_layer         SpanRepLayer                 params=7,347,712
+prompt_rep_layer       Sequential                   params=2,099,712
+total params: 445,463,040
+
+======== raw model output (one forward pass) ========
+output type: GLiNERBaseOutput | logits shape: (1, 42, 12, 6) (batch, words, max_width, num_labels)
+predict_entities wall time on CPU: 4.09s
+
+======== decoded -> JSON (json.dumps of predict_entities list) ========
+[
+  {
+    "start": 8,
+    "end": 14,
+    "text": "Daniel",
+    "label": "person",
+    "score": 0.9929734468460083
+  },
+  {
+    "start": 15,
+    "end": 24,
+    "text": "Whitfield",
+    "label": "person",
+    "score": 0.6286759972572327
+  },
+  {
+    "start": 31,
+    "end": 44,
+    "text": "14 March 1987",
+    "label": "date of birth",
+    "score": 0.9999974966049194
+  },
+  {
+    "start": 58,
+    "end": 82,
+    "text": "daniel.w@meridiancap.com",
+    "label": "email",
+    "score": 0.9999963045120239
+  },
+  {
+    "start": 86,
+    "end": 101,
+    "text": "+1 415-555-0123",
+    "label": "phone number",
+    "score": 0.9999994039535522
+  },
+  {
+    "start": 117,
+    "end": 136,
+    "text": "4485-2210-9931-0042",
+    "label": "account number",
+    "score": 0.999998927116394
+  },
+  {
+    "start": 151,
+    "end": 176,
+    "text": "221B Baker Street, London",
+    "label": "address",
+    "score": 0.9961712956428528
+  }
+]

@@ -1,0 +1,108 @@
+  tokenizer = load_extractor_tokenizer(tokenizer_source)
+  self.encoder = self._load_encoder(
+============================================================
+🧠 Model Configuration
+============================================================
+Encoder model      : microsoft/mdeberta-v3-base
+Counting layer     : count_lstm
+Token pooling      : first
+============================================================
+======== config ========
+ExtractorConfig {
+  "_attn_implementation_autoset": true,
+  "architecture": "span",
+  "architecture_version": 1,
+  "attn_implementation": "sdpa",
+  "config_version": 3,
+  "counting_layer": "count_lstm",
+  "max_len": null,
+  "max_width": 8,
+  "model_name": "microsoft/mdeberta-v3-base",
+  "model_type": "extractor",
+  "span_head": {
+    "dropout": 0.1,
+    "max_width": 8,
+    "span_mode": "markerV0"
+  },
+  "token_pooling": "first",
+  "transformers_version": "4.57.6"
+}
+======== module tree ========
+encoder      DebertaV2Model     params=277,536,768
+span_rep     SpanRepLayer       params=16,526,592
+classifier   Sequential         params=1,182,721
+count_pred   Sequential         params=1,211,924
+count_embed  CountLSTM          params=10,640,640
+total params: 307,098,645
+======== 1) extract_entities ========
+  hooked span_rep: [(1, 36, 8, 768)]
+  hooked count_pred logits: [(1, 20)]
+  hooked count_embed (instance x field queries): [(1, 6, 768)]
+  wall time on CPU: 0.26s
+{
+  "entities": {
+    "full_name": [
+      {
+        "text": "Daniel Whitfield",
+        "confidence": 0.9998045563697815,
+        "start": 8,
+        "end": 24
+      }
+    ],
+    "date_of_birth": [
+      {
+        "text": "14 March 1987",
+        "confidence": 1.0,
+        "start": 31,
+        "end": 44
+      }
+    ],
+    "email": [
+      {
+        "text": "daniel.w@meridiancap.com",
+        "confidence": 0.9999997615814209,
+        "start": 58,
+        "end": 82
+      }
+    ],
+    "phone_number": [
+      {
+        "text": "+1 415-555-0123",
+        "confidence": 0.9999998807907104,
+        "start": 86,
+        "end": 101
+      }
+    ],
+    "account_number": [
+      {
+        "text": "4485-2210-9931-0042",
+        "confidence": 0.9977777600288391,
+        "start": 117,
+        "end": 136
+      }
+    ],
+    "street_address": [
+      {
+        "text": "221B Baker Street",
+        "confidence": 0.9988486766815186,
+        "start": 151,
+        "end": 168
+      }
+    ]
+  }
+}
+======== 2) extract_json (structured record, schema given at inference) ========
+  hooked span_rep: [(1, 36, 8, 768)]
+  hooked count_pred logits: [(1, 20)]
+  hooked count_embed (instance x field queries): [(1, 4, 768)]
+  wall time on CPU: 0.21s
+{
+  "contact": [
+    {
+      "name": "Daniel Whitfield",
+      "email": "daniel.w@meridiancap.com",
+      "phone": "+1 415-555-0123",
+      "address": "221B Baker Street, London"
+    }
+  ]
+}

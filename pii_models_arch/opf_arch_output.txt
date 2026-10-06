@@ -1,0 +1,80 @@
+
+======== checkpoint config ========
+{}
+
+======== module tree (top level) ========
+embedding    Embedding            params=128,040,960
+block        ModuleList           params=1,271,424,112
+norm         RMSNorm              params=640
+unembedding  Linear               params=21,120
+block[0] children: [('attn', 'AttentionBlock'), ('mlp', 'MLPBlock')]
+total params: 1,399,486,832
+label space: {'boundary_label_lookup': {'account_number': {'B': 1, 'I': 2, 'E': 3, 'S': 4}, 'private_address': {'B': 5, 'I': 6, 'E': 7, 'S': 8}, 'private_date': {'B': 9, 'I': 10, 'E': 11, 'S': 12}, 'private_email': {'B': 13, 'I': 14, 'E': 15, 'S': 16}, 'private_person': {'B': 17, 'I': 18, 'E': 19, 'S': 20}, 'private_phone': {'B': 21, 'I': 22, 'E': 23, 'S': 24}, 'private_url': {'B': 25, 'I': 26, 'E': 27, 'S': 28}, 'secret': {'B': 29, 'I': 30, 'E': 31, 'S': 32}}, 'token_to_span_label': {0: 0, 1: 1, 2: 1, 3: 1, 4: 1, 5: 2, 6: 2, 7: 2, 8: 2, 9: 3, 10: 3, 11: 3, 12: 3, 13: 4, 14: 4, 15: 4, 16: 4, 17: 5, 18: 5, 19: 5, 20: 5, 21: 6, 22: 6, 23: 6, 24: 6, 25: 7, 26: 7, 27: 7, 28: 7, 29: 8, 30: 8, 31: 8, 32: 8}, 'token_boundary_tags': {0: None, 1: 'B', 2: 'I', 3: 'E', 4: 'S', 5: 'B', 6: 'I', 7: 'E', 8: 'S', 9: 'B', 10: 'I', 11: 'E', 12: 'S', 13: 'B', 14: 'I', 15: 'E', 16: 'S', 17: 'B', 18: 'I', 19: 'E', 20: 'S', 21: 'B', 22: 'I', 23: 'E', 24: 'S', 25: 'B', 26: 'I', 27: 'E', 28: 'S', 29: 'B', 30: 'I', 31: 'E', 32: 'S'}, 'span_class_names': ('O', 'account_number', 'private_address', 'private_date', 'private_email', 'private_person', 'private_phone', 'private_url', 'secret'), 'span_label_lookup': {'O': 0, 'account_number': 1, 'private_address': 2, 'private_date': 3, 'private_email': 4, 'private_person': 5, 'private_phone': 6, 'private_url': 7, 'secret': 8}, 'background_token_label': 0, 'background_span_label': 0}
+
+======== raw model output (one forward pass) ========
+input tokens: 65 | logits shape: (1, 65, 33) (batch, tokens, labels)
+redact() wall time on CPU: 8.87s
+
+======== decoded -> JSON (opf.redact(...).to_json()) ========
+{
+  "schema_version": 1,
+  "summary": {
+    "output_mode": "typed",
+    "span_count": 6,
+    "by_label": {
+      "account_number": 1,
+      "private_address": 1,
+      "private_date": 1,
+      "private_email": 1,
+      "private_person": 1,
+      "private_phone": 1
+    },
+    "decoded_mismatch": false
+  },
+  "text": "Hi, I'm Daniel Whitfield, born 14 March 1987. Reach me at daniel.w@meridiancap.com or +1 415-555-0123; my account is 4485-2210-9931-0042 and I live at 221B Baker Street, London.",
+  "detected_spans": [
+    {
+      "label": "private_person",
+      "start": 8,
+      "end": 24,
+      "text": "Daniel Whitfield",
+      "placeholder": "<PRIVATE_PERSON>"
+    },
+    {
+      "label": "private_date",
+      "start": 31,
+      "end": 44,
+      "text": "14 March 1987",
+      "placeholder": "<PRIVATE_DATE>"
+    },
+    {
+      "label": "private_email",
+      "start": 58,
+      "end": 82,
+      "text": "daniel.w@meridiancap.com",
+      "placeholder": "<PRIVATE_EMAIL>"
+    },
+    {
+      "label": "private_phone",
+      "start": 86,
+      "end": 101,
+      "text": "+1 415-555-0123",
+      "placeholder": "<PRIVATE_PHONE>"
+    },
+    {
+      "label": "account_number",
+      "start": 117,
+      "end": 136,
+      "text": "4485-2210-9931-0042",
+      "placeholder": "<ACCOUNT_NUMBER>"
+    },
+    {
+      "label": "private_address",
+      "start": 151,
+      "end": 177,
+      "text": "221B Baker Street, London.",
+      "placeholder": "<PRIVATE_ADDRESS>"
+    }
+  ],
+  "redacted_text": "Hi, I'm <PRIVATE_PERSON>, born <PRIVATE_DATE>. Reach me at <PRIVATE_EMAIL> or <PRIVATE_PHONE>; my account is <ACCOUNT_NUMBER> and I live at <PRIVATE_ADDRESS>"
+}
