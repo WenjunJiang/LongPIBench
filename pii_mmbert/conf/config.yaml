@@ -1,0 +1,99 @@
+# Default configuration. Every value can be overridden on the command line with Hydra syntax,
+# e.g. `python main.py stage=final train.lr=3e-5 final.best_params_path=outputs/tune/best_params.json`.
+defaults:
+  - label_map: nemotron_to_opf_v2
+  - _self_
+
+stage: preprocess        # preprocess | tune | final | predict
+seed: 13
+
+paths:                   # relative paths are resolved against the directory main.py is launched from
+  raw_dir: data_raw
+  cache_dir: cache
+  output_dir: outputs
+
+data:
+  train_file: ${paths.raw_dir}/train.parquet
+  test_file: ${paths.raw_dir}/test.parquet
+  locales: [us, intl]
+  max_train_docs: null   # cap on training rows read from train_file (null = all)
+  max_test_docs: null    # cap on test rows read from test_file (null = all)
+  val_fraction: 0.1      # validation split, grouped by uid so us/intl variants stay together
+  max_length: 1024       # tokens per window, including <bos>/<eos>
+  stride: 256            # tokens shared by consecutive windows of a long document
+
+model:
+  name: jhu-clsp/mmBERT-small
+  dropout: 0.1
+
+train:
+  epochs: 3
+  batch_size: 16
+  lr: 5.0e-5             # encoder learning rate
+  head_lr: 5.0e-4        # tag / sensitivity heads
+  weight_decay: 0.01
+  warmup_ratio: 0.05
+  grad_clip: 1.0
+  amp: true              # bf16 autocast when running on CUDA
+  device: auto           # auto | cpu | cuda
+  num_threads: null      # torch CPU threads (null = torch default)
+  log_every: 50          # steps between loss log lines
+
+loss:                    # PII-TRACE: L = lambda_tok * weighted CE(BIES) + lambda_sens * BCE(sensitivity)
+  lambda_tok: 1.5
+  lambda_sens: 0.3
+  background_weight: 0.5 # class weight of "O"; all PII labels have weight 1.0
+
+decode:                  # constrained BIES Viterbi, same bias keys as OPF viterbi_calibration.json
+  trim_whitespace: true
+  biases:
+    transition_bias_background_stay: 0.0
+    transition_bias_background_to_start: 0.0
+    transition_bias_inside_to_continue: 0.0
+    transition_bias_inside_to_end: 0.0
+    transition_bias_end_to_background: 0.0
+    transition_bias_end_to_start: 0.0
+
+eval:
+  max_docs: null         # cap on documents scored per evaluation (null = all)
+
+tune:
+  name: pii_mmbert_tune
+  metric: val_span_f1
+  mode: max
+  num_samples: 16
+  max_concurrent_trials: null
+  resources_per_trial:
+    cpu: 4
+    gpu: 1
+  scheduler:             # ASHA; one time unit = one epoch
+    type: asha
+    grace_period: 1
+    reduction_factor: 2
+  # Each entry samples one config value addressed by its dotted path.
+  # type: loguniform | uniform | choice | randint
+  search_space:
+    - {param: train.lr, type: loguniform, lower: 1.0e-5, upper: 2.0e-4}
+    - {param: train.head_lr, type: loguniform, lower: 1.0e-4, upper: 2.0e-3}
+    - {param: train.weight_decay, type: uniform, lower: 0.0, upper: 0.1}
+    - {param: train.warmup_ratio, type: choice, values: [0.0, 0.05, 0.1]}
+    - {param: train.batch_size, type: choice, values: [8, 16, 32]}
+    - {param: model.dropout, type: choice, values: [0.0, 0.1, 0.2]}
+    - {param: loss.background_weight, type: uniform, lower: 0.1, upper: 1.0}
+    - {param: loss.lambda_sens, type: choice, values: [0.0, 0.3, 1.0]}
+
+final:
+  best_params_path: null       # best_params.json written by stage=tune; null = use config values
+  include_val_in_train: true   # train the final model on train + validation
+  eval_on_test: true
+  output_name: final_model
+
+predict:
+  model_dir: ${paths.output_dir}/${final.output_name}
+  text: "Hi, I'm Daniel Whitfield, born 14 March 1987. Reach me at daniel.w@example.com or +1 415-555-0123."
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${paths.output_dir}/hydra/${now:%Y-%m-%d_%H-%M-%S}

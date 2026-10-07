@@ -1,0 +1,114 @@
+# Nemotron-PII (55 source labels) -> OpenAI Privacy Filter v2 taxonomy (8 span types).
+#
+# Target definitions follow the OPF model card, section 6.1. Every Nemotron label must appear in
+# exactly one of `mapping` (value = target type, or null = background) or `attach`; the
+# preprocessing step fails on any label it has not been told how to handle.
+
+# Order matters: it fixes the BIES label ids (O + B/I/E/S per type = 33 labels, same as OPF v2).
+target_types:
+  - account_number
+  - private_address
+  - private_date
+  - private_email
+  - private_person
+  - private_phone
+  - private_url
+  - secret
+
+mapping:
+  # private_person: name of a private person, incl. usernames/handles that identify a person.
+  first_name: private_person
+  last_name: private_person
+  user_name: private_person
+
+  # private_email / private_phone
+  email: private_email
+  phone_number: private_phone
+  fax_number: private_phone
+
+  # private_url: URL or IP for a private audience or identifying a private person.
+  # OPF maps IP addresses to private_url in its own benchmark remapping.
+  url: private_url
+  ipv4: private_url
+  ipv6: private_url
+
+  # private_date: date of birth / birth year / other datetime identifying a private person.
+  # Generic dates and times are not personal in OPF's taxonomy, so they stay background.
+  date_of_birth: private_date
+  date: null
+  date_time: null
+  time: null
+
+  # private_address: a specific location or address of a private person.
+  street_address: private_address
+  coordinate: private_address
+
+  # account_number: card, bank account, or other account / record identifier.
+  # OPF maps passport, social number, and tax number to account_number.
+  account_number: account_number
+  credit_debit_card: account_number
+  bank_routing_number: account_number
+  customer_id: account_number
+  employee_id: account_number
+  medical_record_number: account_number
+  health_plan_beneficiary_number: account_number
+  ssn: account_number
+  national_id: account_number
+  tax_id: account_number
+  certificate_license_number: account_number
+  license_plate: account_number
+  vehicle_identifier: account_number
+  device_identifier: account_number
+  mac_address: account_number
+  biometric_identifier: account_number
+  unique_id: account_number
+  swift_bic: null            # identifies a bank, not a person
+
+  # secret: password, API key, or other credential.
+  password: secret
+  api_key: secret
+  pin: secret
+  cvv: secret
+  http_cookie: secret
+
+  # Attributes outside the OPF identifier taxonomy -> background.
+  company_name: null
+  occupation: null
+  education_level: null
+  employment_status: null
+  language: null
+  gender: null
+  age: null
+  race_ethnicity: null
+  religious_belief: null
+  political_view: null
+  sexuality: null
+  blood_type: null
+
+# Address components that are kept only when they sit next to a core span of the same target
+# type (e.g. "12 Main St, Springfield, IL 62704"); on their own they are background.
+attach:
+  city: private_address
+  state: private_address
+  county: private_address
+  country: private_address
+  postcode: private_address
+
+# Adjacent spans of the same target type are merged when the text between them matches
+# gap_pattern and is at most max_gap_chars long ("Ethan" + " " + "Connelly" -> one person span).
+merge:
+  enabled: true
+  max_gap_chars: 3
+  gap_pattern: "^[\\s,]*$"
+
+# Source labels that mark a window as sensitive for the auxiliary sensitivity head
+# (PII-TRACE trains a sensitivity head on special-category content as an auxiliary signal).
+sensitive_source_labels:
+  - race_ethnicity
+  - religious_belief
+  - political_view
+  - sexuality
+  - blood_type
+  - medical_record_number
+  - health_plan_beneficiary_number
+  - biometric_identifier

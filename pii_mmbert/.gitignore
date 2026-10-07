@@ -1,0 +1,8 @@
+.venv/
+data_raw/
+cache/
+cache_smoke/
+outputs/
+outputs_smoke/
+*.egg-info/
+__pycache__/

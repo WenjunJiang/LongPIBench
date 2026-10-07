@@ -1,0 +1,31 @@
+# @package _global_
+# Tiny CPU run that exercises every stage end to end. Not a real training configuration.
+paths:
+  cache_dir: cache_smoke
+  output_dir: outputs_smoke
+
+data:
+  max_train_docs: 240
+  max_test_docs: 40
+  val_fraction: 0.2
+  max_length: 256
+  stride: 64
+
+train:
+  epochs: 2
+  batch_size: 8
+  amp: false
+  device: cpu
+  num_threads: 2
+  log_every: 10
+
+eval:
+  max_docs: 30
+
+tune:
+  name: smoke_tune
+  num_samples: 2
+  max_concurrent_trials: 1
+  resources_per_trial:
+    cpu: 2
+    gpu: 0
