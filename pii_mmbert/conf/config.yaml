@@ -4,7 +4,7 @@ defaults:
   - label_map: nemotron_to_opf_v2
   - _self_
 
-stage: preprocess        # preprocess | tune | final | predict
+stage: preprocess        # preprocess | tune | final | calibrate | predict
 seed: 13
 
 paths:                   # relative paths are resolved against the directory main.py is launched from
@@ -18,7 +18,8 @@ data:
   locales: [us, intl]
   max_train_docs: null   # cap on training rows read from train_file (null = all)
   max_test_docs: null    # cap on test rows read from test_file (null = all)
-  val_fraction: 0.1      # validation split, grouped by uid so us/intl variants stay together
+  val_fraction: 0.1      # validation split (tuning / early stopping), grouped by uid
+  calib_fraction: 0.05   # calibration split (Platt + thresholds); never used for training, grouped by uid
   max_length: 1024       # tokens per window, including <bos>/<eos>
   stride: 256            # tokens shared by consecutive windows of a long document
   num_proc: 4            # processes for datasets.map during preprocessing (null = 1)
@@ -89,6 +90,16 @@ final:
   include_val_in_train: true   # train the final model on train + validation
   eval_on_test: true
   output_name: final_model
+
+calibration:             # stage=calibrate: Platt scaling + F-beta thresholds on the calib split
+  model_dir: ${paths.output_dir}/${final.output_name}
+  max_docs: null         # cap on calib documents (null = all)
+  per_type: true         # fit Platt and threshold per span type
+  min_spans_per_type: 50 # fewer calibration spans than this -> use the global Platt fit for that type
+  beta: 1.0              # threshold maximises F-beta on the calib split (beta > 1 favours recall)
+  sensitivity: true      # also calibrate the document sensitivity head
+  eval_on_test: true     # report test metrics before / after calibration
+  output_file: calibration.json   # written into model_dir; stage=predict applies it when present
 
 predict:
   model_dir: ${paths.output_dir}/${final.output_name}

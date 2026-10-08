@@ -7,6 +7,7 @@ import math
 import random
 import time
 from contextlib import nullcontext
+from dataclasses import dataclass, field
 from functools import partial
 
 import numpy as np
@@ -69,28 +70,37 @@ def _autocast(device, enabled):
     return nullcontext()
 
 
+@dataclass
+class DocPrediction:
+    spans: list = field(default_factory=list)       # [(type, char_start, char_end)]
+    scores: list = field(default_factory=list)      # raw span confidence: mean prob of the decoded labels
+    token_spans: list = field(default_factory=list) # [(token_start, token_end_exclusive)] per span
+    path: list = field(default_factory=list)        # token label ids
+    sens_logit: float = float("-inf")               # max sensitivity logit over the document's windows
+
+
 @torch.no_grad()
 def predict_document(model, text: str, input_ids, offset_start, offset_end, space: LabelSpace,
-                     decoder: ViterbiDecoder, cfg, device, bos_id: int, eos_id: int, pad_id: int):
-    """Average overlapping windows' log-probs per token, then one Viterbi pass over the document.
-
-    Returns (char spans [(type, start, end)], token label path).
-    """
+                     decoder: ViterbiDecoder, cfg, device, bos_id: int, eos_id: int, pad_id: int
+                     ) -> DocPrediction:
+    """Average overlapping windows' log-probs per token, then one Viterbi pass over the document."""
     n = len(input_ids)
     if n == 0:
-        return [], []
+        return DocPrediction()
     windows = [{"token_start": st, "input_ids": ids}
                for st, ids, _, _ in doc_windows(input_ids, offset_start, offset_end, None, [], [],
                                                 cfg.data.max_length, cfg.data.stride, bos_id, eos_id,
                                                 with_labels=False)]
     acc = torch.full((n, space.num_labels), -math.inf)
     count = torch.zeros(n)
+    sens_logit = float("-inf")
     bs = max(1, int(cfg.train.batch_size))
     for i in range(0, len(windows), bs):
         chunk = windows[i: i + bs]
         ids, mask, _, _ = collate(chunk, pad_id)
         with _autocast(device, cfg.train.amp):
-            logits, _ = model(ids.to(device), mask.to(device))
+            logits, sens = model(ids.to(device), mask.to(device))
+        sens_logit = max(sens_logit, float(sens.float().max()))
         lp = F.log_softmax(logits.float(), dim=-1).cpu()
         for w, row in zip(chunk, lp):
             m = len(w["input_ids"]) - 2
@@ -99,7 +109,8 @@ def predict_document(model, text: str, input_ids, offset_start, offset_end, spac
             count[sl] += 1
     avg = acc - torch.log(count.clamp(min=1)).unsqueeze(1)
     path = decoder.decode(avg)
-    spans = []
+    path_prob = avg.gather(1, torch.tensor(path).unsqueeze(1)).squeeze(1).exp()
+    out = DocPrediction(path=path, sens_logit=sens_logit)
     for typ, a, b in labels_to_spans(path, space):
         st, en = int(offset_start[a]), int(offset_end[b - 1])
         if cfg.decode.trim_whitespace:
@@ -108,23 +119,37 @@ def predict_document(model, text: str, input_ids, offset_start, offset_end, spac
             while en > st and text[en - 1].isspace():
                 en -= 1
         if en > st:
-            spans.append((typ, st, en))
-    return spans, path
+            out.spans.append((typ, st, en))
+            out.scores.append(float(path_prob[a:b].mean()))
+            out.token_spans.append((a, b))
+    return out
 
 
-def evaluate(model, docs, space: LabelSpace, cfg, device, bos_id, eos_id, pad_id) -> dict:
-    """Score a document Dataset (memory-mapped; rows are read one at a time)."""
+def iter_predictions(model, docs, space: LabelSpace, cfg, device, bos_id, eos_id, pad_id, max_docs=None):
+    """Yield (row, DocPrediction) for a document Dataset (memory-mapped; rows read one at a time)."""
     model.eval()
     decoder = ViterbiDecoder(space, dict(cfg.decode.biases))
-    limit = cfg.eval.max_docs
-    if limit is not None:
-        docs = docs.select(range(min(int(limit), len(docs))))
-    scorer = SpanScorer(space.span_types)
+    if max_docs is not None:
+        docs = docs.select(range(min(int(max_docs), len(docs))))
     for row in docs:
-        pred_spans, path = predict_document(model, row["text"], row["input_ids"], row["offset_start"],
-                                            row["offset_end"], space, decoder, cfg, device,
-                                            bos_id, eos_id, pad_id)
-        scorer.add(gold_spans(row), pred_spans, row["token_labels"], path)
+        yield row, predict_document(model, row["text"], row["input_ids"], row["offset_start"],
+                                    row["offset_end"], space, decoder, cfg, device, bos_id, eos_id, pad_id)
+
+
+def evaluate(model, docs, space: LabelSpace, cfg, device, bos_id, eos_id, pad_id, calibrator=None) -> dict:
+    """Span/token metrics on a document Dataset; with a calibrator, spans below threshold are dropped."""
+    scorer = SpanScorer(space.span_types)
+    for row, pred in iter_predictions(model, docs, space, cfg, device, bos_id, eos_id, pad_id,
+                                      cfg.eval.max_docs):
+        spans, path = pred.spans, pred.path
+        if calibrator is not None:
+            keep = {i for i, _ in calibrator.keep(pred.spans, pred.scores)}
+            spans = [sp for i, sp in enumerate(pred.spans) if i in keep]
+            path = list(pred.path)
+            for i, (a, b) in enumerate(pred.token_spans):
+                if i not in keep:
+                    path[a:b] = [0] * (b - a)
+        scorer.add(gold_spans(row), spans, row["token_labels"], path)
     return scorer.result()
 
 

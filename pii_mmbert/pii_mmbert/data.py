@@ -57,7 +57,7 @@ WINDOW_FEATURES = Features({
     "token_start": Value("int32"),
 })
 
-SPLITS = ("train", "val", "test")
+SPLITS = ("train", "val", "calib", "test")
 
 
 # ----------------------------------------------------------------------------- label mapping
@@ -222,7 +222,7 @@ def _cache_key(cfg) -> str:
         "label_map": OmegaConf.to_container(cfg.label_map, resolve=True),
         "model": cfg.model.name,
         "seed": cfg.seed,
-        "version": 2,
+        "version": 3,
     }
     for k in ("max_length", "stride", "num_proc"):   # do not change the document datasets
         payload["data"].pop(k, None)
@@ -285,16 +285,28 @@ def _build(cfg, resolve_path, root: Path, space: LabelSpace) -> None:
                                remove_columns=ds.column_names, features=DOC_FEATURES,
                                fn_kwargs={"mapper": mapper, "tokenizer": tokenizer, "space": space},
                                desc=f"encode {name}")
-    seed, frac = cfg.seed, cfg.data.val_fraction
+    seed = cfg.seed
+    val_frac, calib_frac = float(cfg.data.val_fraction), float(cfg.data.calib_fraction)
+    if val_frac + calib_frac >= 1.0:
+        raise ValueError("data.val_fraction + data.calib_fraction must be < 1")
 
-    def is_val(batch):
-        return [(zlib.crc32(f"{seed}:{u}".encode()) & 0xFFFFFFFF) / 2**32 < frac for u in batch["uid"]]
+    def assign(batch):
+        # Grouped by uid so the us/intl variants of a document always land in the same split.
+        out = []
+        for u in batch["uid"]:
+            h = (zlib.crc32(f"{seed}:{u}".encode()) & 0xFFFFFFFF) / 2**32
+            out.append(1 if h < val_frac else 2 if h < val_frac + calib_frac else 0)
+        return {"_split": out}
 
-    flags = encoded["train"].map(lambda b: {"_val": is_val(b)}, batched=True, num_proc=num_proc,
-                                 desc="split")
+    flags = encoded["train"].map(assign, batched=True, num_proc=num_proc, desc="split")
+
+    def pick(code):
+        return flags.filter(lambda b: [x == code for x in b["_split"]], batched=True).remove_columns("_split")
+
     splits = {
-        "train": flags.filter(lambda b: [not v for v in b["_val"]], batched=True).remove_columns("_val"),
-        "val": flags.filter(lambda b: b["_val"], batched=True).remove_columns("_val"),
+        "train": pick(0),
+        "val": pick(1),
+        "calib": pick(2),
         "test": encoded["test"],
     }
     for name, ds in splits.items():

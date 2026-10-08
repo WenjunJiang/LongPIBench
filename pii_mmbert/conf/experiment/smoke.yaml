@@ -8,6 +8,7 @@ data:
   max_train_docs: 240
   max_test_docs: 40
   val_fraction: 0.2
+  calib_fraction: 0.2
   max_length: 256
   stride: 64
   num_proc: 2
@@ -30,3 +31,6 @@ tune:
   resources_per_trial:
     cpu: 2
     gpu: 0
+
+calibration:
+  min_spans_per_type: 10

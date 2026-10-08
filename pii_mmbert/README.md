@@ -16,14 +16,15 @@ Token-level PII detector trained on NVIDIA Nemotron-PII:
 conf/config.yaml                         all defaults: data, model, train, loss, decode, tune, final, predict
 conf/label_map/nemotron_to_opf_v2.yaml   Nemotron -> OPF label mapping, merge rules, sensitive labels
 conf/experiment/smoke.yaml               tiny CPU run used to check the pipeline
-main.py                                  Hydra entry point (stage=preprocess|tune|final|predict)
+main.py                                  Hydra entry point (stage=preprocess|tune|final|calibrate|predict)
 pii_mmbert/labels.py                     BIES label space, labels -> spans
 pii_mmbert/viterbi.py                    constrained Viterbi (OPF semantics)
 pii_mmbert/data.py                       label mapping, tokenization, windows; Hugging Face datasets cache
 pii_mmbert/model.py                      encoder + tag head + sensitivity head, PII-TRACE loss
 pii_mmbert/engine.py                     training loop, document-level evaluation
 pii_mmbert/metrics.py                    span and token metrics
-pii_mmbert/stages.py                     preprocess / Ray Tune / final / predict
+pii_mmbert/calibration.py                Platt scaling, F-beta thresholds, ECE
+pii_mmbert/stages.py                     preprocess / Ray Tune / final / calibrate / predict
 tests/                                   mapping, BIES, windows, Viterbi-vs-OPF tests
 ```
 
@@ -58,7 +59,11 @@ python main.py stage=tune tune.num_samples=32 tune.resources_per_trial.gpu=1 tra
 python main.py stage=final final.best_params_path=outputs/tune/best_params.json
 python main.py stage=final final.best_params_path=outputs/tune/best_params.json train.epochs=5 train.lr=3e-5
 
-# 4. Predict
+# 4. Calibrate: Platt scaling + F-beta thresholds on the held-out calib split, written to calibration.json
+python main.py stage=calibrate
+python main.py stage=calibrate calibration.beta=2.0          # favour recall when choosing thresholds
+
+# 5. Predict (applies calibration.json when present: calibrated scores, thresholded spans, sensitivity)
 python main.py stage=predict predict.text="Call Kim Min-jun at 010-1234-5678"
 
 # Any stage with the tiny CPU settings
@@ -69,7 +74,8 @@ Outputs:
 
 - `outputs/tune/best_params.json`, `summary.json`, `trials.csv`, `ray_results/`
 - `outputs/final_model/`: `encoder/` (Hugging Face format + tokenizer), `heads.pt`, `pii_tagger.json`
-  (labels, decode biases, window settings), `resolved_config.yaml`, `metrics.json`
+  (labels, decode biases, window settings), `resolved_config.yaml`, `metrics.json`, and after
+  `stage=calibrate` `calibration.json` (Platt parameters, thresholds, calibration and test report)
 
 ## Design notes
 
@@ -81,8 +87,20 @@ Outputs:
   so first name + last name becomes one `private_person` span, as OPF predicts it.
 - **Span offsets**: Nemotron's span `text` field differs from `text[start:end]` in case only (6,770 spans);
   offsets are used as-is.
-- **Splits**: each Nemotron uid appears twice (us and intl locale). The validation split is grouped by uid
-  so the two variants never land on different sides.
+- **Splits**: each Nemotron uid appears twice (us and intl locale). Nemotron's train file is split by a
+  seeded hash of the uid into train / val (`data.val_fraction`, used by Ray Tune) / calib
+  (`data.calib_fraction`), so the two variants never land on different sides. The calib split is never
+  trained on, including in `stage=final` with `include_val_in_train=true`. Nemotron's test file is the test set.
+- **Calibration** (`stage=calibrate`, `pii_mmbert/calibration.py`):
+  - Raw span score = mean probability of the decoded labels over the span's tokens. Target = the span
+    exactly matches a gold span (type and character offsets).
+  - Platt scaling `p = sigmoid(a * logit(score) + b)`, fitted with Platt's smoothed targets, per span type
+    when the type has at least `calibration.min_spans_per_type` calib spans, otherwise the global fit.
+  - Threshold per type maximises F-beta on the calib split. Recall's denominator is all gold spans of that
+    type, including ones the decoder never proposed, so a threshold can only trade precision for recall.
+  - The sensitivity head is calibrated the same way at document level (max window logit vs. whether the
+    document contains a sensitive source label).
+  - The report lists ECE before and after Platt on calib and test, and test P/R/F1 before and after thresholds.
 - **Storage**: preprocessed documents and training windows are Hugging Face `datasets` written with
   `save_to_disk` under `cache/nemotron_<hash>/` (`train`, `val`, `test`, `windows_<split>_L<len>_S<stride>`).
   They are memory-mapped with `load_from_disk`, so training and evaluation read rows on demand, and Ray Tune
