@@ -98,6 +98,10 @@ Outputs:
     when the type has at least `calibration.min_spans_per_type` calib spans, otherwise the global fit.
   - Threshold per type maximises F-beta on the calib split. Recall's denominator is all gold spans of that
     type, including ones the decoder never proposed, so a threshold can only trade precision for recall.
+  - A type gets its own threshold only with at least `min_spans_per_type` calib spans and at least one
+    correct one. With too few spans it uses the global threshold. With enough spans but none correct,
+    `calibration.zero_positive_policy` decides: `global` (default; keeps recall for PII) or `reject`
+    (drop the type). The rule used per type is recorded as `threshold_rule` in `calibration.json`.
   - The sensitivity head is calibrated the same way at document level (max window logit vs. whether the
     document contains a sensitive source label).
   - The report lists ECE before and after Platt on calib and test, and test P/R/F1 before and after thresholds.
@@ -128,4 +132,7 @@ Outputs:
 - After moving to `datasets`, the smoke `tune` → `final` → `predict` run was repeated and all stages passed.
   Ray Tune's random search is seeded from `seed` (`BasicVariantGenerator(random_state=seed)`); two Tuner
   runs with the same seed drew identical configurations.
+- `stage=calibrate` on the smoke model (41 calib rows): span ECE 0.105 → 0.046 on calib and
+  0.115 → 0.077 on test; thresholds raised test span precision 0.17 → 0.50 at unchanged recall. The smoke
+  model is undertrained (34 steps), so only the mechanics are meaningful here.
 - A full run needs a GPU: the smoke epoch took ~190 s for 328 windows of 256 tokens on 2 CPU threads.

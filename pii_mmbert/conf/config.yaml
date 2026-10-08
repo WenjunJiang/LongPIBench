@@ -95,7 +95,8 @@ calibration:             # stage=calibrate: Platt scaling + F-beta thresholds on
   model_dir: ${paths.output_dir}/${final.output_name}
   max_docs: null         # cap on calib documents (null = all)
   per_type: true         # fit Platt and threshold per span type
-  min_spans_per_type: 50 # fewer calibration spans than this -> use the global Platt fit for that type
+  min_spans_per_type: 50 # fewer calibration spans than this -> global Platt fit and global threshold
+  zero_positive_policy: global   # type with enough calib spans but none correct: global | reject (drop type)
   beta: 1.0              # threshold maximises F-beta on the calib split (beta > 1 favours recall)
   sensitivity: true      # also calibrate the document sensitivity head
   eval_on_test: true     # report test metrics before / after calibration

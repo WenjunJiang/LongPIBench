@@ -27,6 +27,7 @@ import torch
 import torch.nn.functional as F
 
 EPS = 1e-6
+REJECT_ALL = 1.01  # threshold above any probability
 
 
 def logit(p: float) -> float:
@@ -160,6 +161,8 @@ def fit_calibrator(span_records, gold_per_type: dict, sens_records, cfg_cal) -> 
     """span_records: [(type, raw_score, is_tp)]; gold_per_type: {type: n_gold};
     sens_records: [(sens_logit, label)] or empty."""
     beta, min_n = float(cfg_cal.beta), int(cfg_cal.min_spans_per_type)
+    if cfg_cal.zero_positive_policy not in ("global", "reject"):
+        raise ValueError("calibration.zero_positive_policy must be 'global' or 'reject'")
     cal = Calibrator()
     all_scores = [logit(r) for _, r, _ in span_records]
     all_tp = [int(t) for _, _, t in span_records]
@@ -180,6 +183,17 @@ def fit_calibrator(span_records, gold_per_type: dict, sens_records, cfg_cal) -> 
                 entry["platt"] = "global"
             probs = [cal.span_prob(typ, span_records[i][1]) for i in idx]
             best = best_threshold(probs, [all_tp[i] for i in idx], n_gold, beta)
+            if len(idx) < min_n:
+                # Too little evidence for a type-specific threshold.
+                best["threshold"], entry["threshold_rule"] = overall["threshold"], "global (few spans)"
+            elif entry["positives"] == 0:
+                # Many predictions, none correct on calib: reject the type or fall back to global.
+                if cfg_cal.zero_positive_policy == "reject":
+                    best["threshold"], entry["threshold_rule"] = REJECT_ALL, "reject (no correct spans)"
+                else:
+                    best["threshold"], entry["threshold_rule"] = overall["threshold"], "global (no correct spans)"
+            else:
+                entry["threshold_rule"] = "per_type"
             cal.span_threshold[typ] = best["threshold"]
             cal.report["spans"][typ] = {**entry, **best}
 

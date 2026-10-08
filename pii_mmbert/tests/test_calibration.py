@@ -43,11 +43,21 @@ def test_calibrator_per_type_fallback_and_roundtrip(tmp_path):
         records.append(("private_person", raw, int(rng.random() < raw)))
     for _ in range(5):                       # too few secret spans -> global Platt
         records.append(("secret", 0.9, 1))
-    cfg = OmegaConf.create({"beta": 1.0, "min_spans_per_type": 50, "per_type": True, "sensitivity": True})
+    for _ in range(60):                      # many date spans, none correct
+        records.append(("private_date", 0.95, 0))
+    cfg = OmegaConf.create({"beta": 1.0, "min_spans_per_type": 50, "per_type": True, "sensitivity": True,
+                            "zero_positive_policy": "global"})
     sens = [(rng.uniform(-3, 3), 0) for _ in range(50)] + [(rng.uniform(0, 5), 1) for _ in range(50)]
-    cal = fit_calibrator(records, {"private_person": 420, "secret": 5}, sens, cfg)
+    gold = {"private_person": 420, "secret": 5, "private_date": 3}
+    cal = fit_calibrator(records, gold, sens, cfg)
     assert "private_person" in cal.span_platt and "secret" not in cal.span_platt
     assert cal.report["spans"]["secret"]["platt"] == "global"
+    g = cal.span_threshold["__all__"]
+    assert cal.span_threshold["secret"] == g and cal.span_threshold["private_date"] == g
+    assert cal.report["spans"]["private_date"]["threshold_rule"] == "global (no correct spans)"
+    assert cal.report["spans"]["private_person"]["threshold_rule"] == "per_type"
+    rejecting = fit_calibrator(records, gold, sens, OmegaConf.merge(cfg, {"zero_positive_policy": "reject"}))
+    assert rejecting.keep([("private_date", 0, 3)], [0.999]) == []
     assert cal.sens_platt is not None and 0.0 <= cal.sens_threshold <= 1.0
     path = tmp_path / "calibration.json"
     cal.save(path)
