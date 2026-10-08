@@ -107,4 +107,7 @@ Outputs:
   epoch 1; `stage=final` applied `best_params.json` and the command-line `train.batch_size=8` on top;
   `stage=predict` returned JSON spans. Smoke numbers only show the pipeline runs; they are not a quality
   result.
+- After moving to `datasets`, the smoke `tune` → `final` → `predict` run was repeated and all stages passed.
+  Ray Tune's random search is seeded from `seed` (`BasicVariantGenerator(random_state=seed)`); two Tuner
+  runs with the same seed drew identical configurations.
 - A full run needs a GPU: the smoke epoch took ~190 s for 328 windows of 256 tokens on 2 CPU threads.

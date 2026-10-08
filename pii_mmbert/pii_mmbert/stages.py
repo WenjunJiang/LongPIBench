@@ -75,6 +75,7 @@ def run_tune(cfg, resolve_path) -> dict:
     import ray
     from ray import tune
     from ray.tune.schedulers import ASHAScheduler
+    from ray.tune.search import BasicVariantGenerator
 
     data = load_or_build(cfg, resolve_path)
     bos, eos, _ = special_ids(cfg.model.name)
@@ -101,6 +102,7 @@ def run_tune(cfg, resolve_path) -> dict:
         param_space=build_search_space(OmegaConf.to_container(cfg.tune.search_space, resolve=True)),
         tune_config=tune.TuneConfig(metric=cfg.tune.metric, mode=cfg.tune.mode,
                                     num_samples=int(cfg.tune.num_samples), scheduler=scheduler,
+                                    search_alg=BasicVariantGenerator(random_state=int(cfg.seed)),
                                     max_concurrent_trials=cfg.tune.max_concurrent_trials),
         run_config=tune.RunConfig(name=cfg.tune.name, storage_path=str(out_dir / "ray_results")),
     )
