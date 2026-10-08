@@ -3,7 +3,8 @@ from pathlib import Path
 import pytest
 from omegaconf import OmegaConf
 
-from pii_mmbert.data import Document, LabelMapper, make_windows, token_bies_labels
+from pii_mmbert.data import (DOC_FEATURES, LabelMapper, _encode_batch, _windows_batch, doc_windows,
+                             token_bies_labels, window_bounds)
 from pii_mmbert.labels import IGNORE_INDEX, LabelSpace, labels_to_spans
 
 CONF = Path(__file__).resolve().parents[1] / "conf" / "label_map" / "nemotron_to_opf_v2.yaml"
@@ -58,11 +59,43 @@ def test_bies_round_trip():
 
 def test_windows_cover_every_token_with_overlap():
     n = 50
-    doc = Document("u", "x" * n, [], [], list(range(10, 10 + n)), [(i, i + 1) for i in range(n)], [0] * n)
-    wins = make_windows(doc, 0, max_length=22, stride=5, bos_id=2, eos_id=1)
+    ids, starts, ends, labs = list(range(10, 10 + n)), list(range(n)), list(range(1, n + 1)), [0] * n
     covered = set()
-    for w in wins:
-        assert w.input_ids[0] == 2 and w.input_ids[-1] == 1 and w.input_ids.dtype.kind == "i"
-        assert w.labels[0] == IGNORE_INDEX and w.labels[-1] == IGNORE_INDEX
-        covered |= set(range(w.token_start, w.token_start + len(w.input_ids) - 2))
+    for st, w_ids, w_labs, _ in doc_windows(ids, starts, ends, labs, [], [], max_length=22, stride=5,
+                                            bos_id=2, eos_id=1):
+        assert w_ids[0] == 2 and w_ids[-1] == 1 and w_ids.dtype.kind == "i"
+        assert w_labs[0] == IGNORE_INDEX and w_labs[-1] == IGNORE_INDEX
+        covered |= set(range(st, st + len(w_ids) - 2))
     assert covered == set(range(n))
+    assert window_bounds(10, 22, 5) == [(0, 10)]
+
+
+def test_encode_and_window_with_datasets_map(mapper):
+    """Runs the real datasets.map pipeline on two tiny rows with the mmBERT tokenizer."""
+    datasets = pytest.importorskip("datasets")
+    transformers = pytest.importorskip("transformers")
+    try:
+        tok = transformers.AutoTokenizer.from_pretrained("jhu-clsp/mmBERT-small")
+    except Exception as exc:  # offline machines
+        pytest.skip(f"tokenizer unavailable: {exc}")
+    t1 = "I, Ethan Connelly, live at 87 Main St, Springfield. I am Buddhist."
+    t2 = "No personal data here."
+    rows = {"uid": ["a", "b"], "locale": ["us", "us"], "text": [t1, t2],
+            "spans": [str([_span(t1, "Ethan", "first_name"), _span(t1, "Connelly", "last_name"),
+                           _span(t1, "87 Main St", "street_address"), _span(t1, "Springfield", "city"),
+                           _span(t1, "Buddhist", "religious_belief")]), "[]"]}
+    space = LabelSpace(tuple(OmegaConf.load(CONF).target_types))
+    ds = datasets.Dataset.from_dict(rows).map(
+        _encode_batch, batched=True, remove_columns=list(rows), features=DOC_FEATURES,
+        fn_kwargs={"mapper": mapper, "tokenizer": tok, "space": space})
+    r = ds[0]
+    assert list(zip(r["span_type"], r["span_start"], r["span_end"])) == [
+        ("private_person", t1.index("Ethan"), t1.index(",", 4)),
+        ("private_address", t1.index("87"), t1.index("Springfield") + len("Springfield"))]
+    labels = [space.names[i] for i in r["token_labels"] if i]
+    assert labels[0] == "B-private_person" and labels[-1] == "E-private_address"
+    assert ds[1]["span_type"] == [] and not any(ds[1]["token_labels"])
+    win = ds.map(_windows_batch, batched=True, with_indices=True, remove_columns=ds.column_names,
+                 fn_kwargs={"max_length": 16, "stride": 4, "bos_id": 2, "eos_id": 1})
+    assert len(win) > 2 and set(win["doc_index"]) == {0, 1}
+    assert max(win["sensitive"]) == 1.0 and win["sensitive"][-1] == 0.0

@@ -6,10 +6,9 @@ import json
 import logging
 from pathlib import Path
 
-import torch
 from omegaconf import DictConfig, OmegaConf
 
-from .data import Document, load_or_build
+from .data import load_or_build, load_windows, windows_dir
 from .engine import pick_device, predict_document, special_ids, train, evaluate
 from .model import load_model, save_model
 from .viterbi import ViterbiDecoder
@@ -60,12 +59,15 @@ def run_preprocess(cfg, resolve_path) -> dict:
     return data["stats"]
 
 
-def _tune_trial(params: dict, base_cfg: dict, train_docs: list[Document], val_docs: list[Document]):
+def _tune_trial(params: dict, base_cfg: dict, windows_dir: str, val_dir: str):
+    """One Ray Tune trial. Receives dataset directories only and memory-maps them, so trials share
+    the page cache instead of each holding a copy of the data."""
+    from datasets import load_from_disk
     from ray import tune
     from .labels import LabelSpace
     cfg = apply_params(OmegaConf.create(base_cfg), params)
     space = LabelSpace(tuple(cfg.label_map.target_types))
-    train(cfg, train_docs, space, eval_docs=val_docs, eval_prefix="val",
+    train(cfg, load_from_disk(windows_dir), space, eval_docs=load_from_disk(val_dir), eval_prefix="val",
           report=lambda m: tune.report(_clean(m)))
 
 
@@ -75,6 +77,8 @@ def run_tune(cfg, resolve_path) -> dict:
     from ray.tune.schedulers import ASHAScheduler
 
     data = load_or_build(cfg, resolve_path)
+    bos, eos, _ = special_ids(cfg.model.name)
+    load_windows(cfg, data, ["train"], bos, eos)        # build once in the driver; trials memory-map it
     out_dir = Path(resolve_path(cfg.paths.output_dir)) / "tune"
     out_dir.mkdir(parents=True, exist_ok=True)
     base_cfg = OmegaConf.to_container(cfg, resolve=True)
@@ -86,7 +90,9 @@ def run_tune(cfg, resolve_path) -> dict:
                               reduction_factor=int(cfg.tune.scheduler.reduction_factor))
     res = dict(cfg.tune.resources_per_trial)
     trainable = tune.with_resources(
-        tune.with_parameters(_tune_trial, base_cfg=base_cfg, train_docs=data["train"], val_docs=data["val"]),
+        tune.with_parameters(_tune_trial, base_cfg=base_cfg,
+                             windows_dir=str(windows_dir(cfg, data, "train")),
+                             val_dir=str(data["root"] / "val")),
         {"cpu": res.get("cpu", 1), "gpu": res.get("gpu", 0)},
     )
     ray.init(ignore_reinit_error=True, include_dashboard=False)
@@ -127,14 +133,15 @@ def resolve_final_cfg(cfg: DictConfig, cli_overrides: list[str], resolve_path) -
 def run_final(cfg: DictConfig, cli_overrides: list[str], resolve_path) -> dict:
     cfg = resolve_final_cfg(cfg, cli_overrides, resolve_path)
     data = load_or_build(cfg, resolve_path)
-    train_docs = data["train"] + (data["val"] if cfg.final.include_val_in_train else [])
+    bos, eos, pad = special_ids(cfg.model.name)
+    splits = ["train", "val"] if cfg.final.include_val_in_train else ["train"]
+    windows = load_windows(cfg, data, splits, bos, eos)
     eval_docs = None if cfg.final.include_val_in_train else data["val"]
-    model, metrics = train(cfg, train_docs, data["space"], eval_docs=eval_docs, eval_prefix="val")
+    model, metrics = train(cfg, windows, data["space"], eval_docs=eval_docs, eval_prefix="val")
 
     out_dir = Path(resolve_path(cfg.paths.output_dir)) / cfg.final.output_name
     if cfg.final.eval_on_test:
         device = pick_device(cfg.train.device)
-        bos, eos, pad = special_ids(cfg.model.name)
         test = evaluate(model, data["test"], data["space"], cfg, device, bos, eos, pad)
         metrics.update({f"test_{k}": v for k, v in test.items()})
     from transformers import AutoTokenizer
@@ -157,11 +164,13 @@ def run_predict(cfg, resolve_path) -> list[dict]:
     tok = AutoTokenizer.from_pretrained(model_dir / "encoder")
     text = cfg.predict.text
     enc = tok(text, add_special_tokens=False, return_offsets_mapping=True)
-    doc = Document("predict", text, [], [], enc["input_ids"], enc["offset_mapping"])
+    starts = [a for a, _ in enc["offset_mapping"]]
+    ends = [b for _, b in enc["offset_mapping"]]
     bos, eos, pad = special_ids(str(model_dir / "encoder"))
     run_cfg = OmegaConf.merge(cfg, {"data": {"max_length": meta["max_length"], "stride": meta["stride"]}})
-    biases = dict(cfg.decode.biases)
-    spans, _ = predict_document(model, doc, space, ViterbiDecoder(space, biases), run_cfg, device, bos, eos, pad)
+    decoder = ViterbiDecoder(space, dict(cfg.decode.biases))
+    spans, _ = predict_document(model, text, enc["input_ids"], starts, ends, space, decoder, run_cfg,
+                                device, bos, eos, pad)
     out = [{"label": t, "start": s, "end": e, "text": text[s:e]} for t, s, e in spans]
     print(json.dumps({"text": text, "detected_spans": out}, ensure_ascii=False, indent=2))
     return out

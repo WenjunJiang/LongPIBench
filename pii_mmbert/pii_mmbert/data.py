@@ -1,4 +1,19 @@
-"""Nemotron-PII loading, label mapping to the OPF taxonomy, tokenization and windowing."""
+"""Nemotron-PII loading, label mapping to the OPF taxonomy, tokenization and windowing.
+
+All preprocessed data is stored as Hugging Face `datasets` (Arrow files on disk). Datasets are
+memory-mapped when loaded, so training, evaluation and Ray Tune trials read rows on demand instead of
+holding the corpus in Python objects.
+
+Document dataset columns (one row per Nemotron row):
+    uid, text,
+    span_type / span_start / span_end      gold spans in the target taxonomy (char offsets)
+    sens_start / sens_end                  char ranges of sensitive source labels
+    input_ids, offset_start, offset_end    tokenizer output without special tokens
+    token_labels                           BIES label id per token
+
+Window dataset columns (one row per training window):
+    input_ids (with <bos>/<eos>), labels (IGNORE_INDEX on specials), sensitive, doc_index, token_start
+"""
 
 from __future__ import annotations
 
@@ -8,44 +23,41 @@ import json
 import logging
 import os
 import re
+import shutil
 import zlib
-from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
-import torch
+from datasets import Dataset, Features, Sequence, Value, concatenate_datasets, load_from_disk
 from transformers import AutoTokenizer
 
 from .labels import IGNORE_INDEX, LabelSpace
 
 log = logging.getLogger(__name__)
 
+DOC_FEATURES = Features({
+    "uid": Value("string"),
+    "text": Value("string"),
+    "span_type": Sequence(Value("string")),
+    "span_start": Sequence(Value("int32")),
+    "span_end": Sequence(Value("int32")),
+    "sens_start": Sequence(Value("int32")),
+    "sens_end": Sequence(Value("int32")),
+    "input_ids": Sequence(Value("int32")),
+    "offset_start": Sequence(Value("int32")),
+    "offset_end": Sequence(Value("int32")),
+    "token_labels": Sequence(Value("int16")),
+})
 
-@dataclass
-class Document:
-    """One text with gold spans; per-token data is stored as compact numpy arrays."""
-    uid: str
-    text: str
-    spans: list[tuple[str, int, int]]          # gold (type, char_start, char_end) in target taxonomy
-    sensitive_spans: list[tuple[int, int]]     # char ranges of sensitive source labels
-    token_ids: np.ndarray = field(default_factory=lambda: np.zeros(0, np.int32))
-    offsets: np.ndarray = field(default_factory=lambda: np.zeros((0, 2), np.int32))
-    token_labels: np.ndarray = field(default_factory=lambda: np.zeros(0, np.int16))
+WINDOW_FEATURES = Features({
+    "input_ids": Sequence(Value("int32")),
+    "labels": Sequence(Value("int16")),
+    "sensitive": Value("float32"),
+    "doc_index": Value("int32"),
+    "token_start": Value("int32"),
+})
 
-    def __post_init__(self) -> None:
-        self.token_ids = np.asarray(self.token_ids, dtype=np.int32)
-        self.offsets = np.asarray(self.offsets, dtype=np.int32).reshape(-1, 2)
-        self.token_labels = np.asarray(self.token_labels, dtype=np.int16)
-
-
-@dataclass
-class Window:
-    doc_index: int
-    token_start: int                           # index into Document.token_ids
-    input_ids: np.ndarray                      # with <bos>/<eos>
-    labels: np.ndarray | None                  # IGNORE_INDEX on special tokens; None for inference
-    sensitive: float
+SPLITS = ("train", "val", "test")
 
 
 # ----------------------------------------------------------------------------- label mapping
@@ -78,8 +90,7 @@ class LabelMapper:
             raise ValueError(f"source labels missing from label_map: {unknown}")
         sensitive = [(s["start"], s["end"]) for s in source_spans if s["label"] in self.sensitive]
 
-        # (type, start, end, is_core)
-        cand = []
+        cand = []  # (type, start, end, is_core)
         for s in source_spans:
             if s["label"] in self.mapping:
                 tgt = self.mapping[s["label"]]
@@ -109,7 +120,7 @@ class LabelMapper:
         return spans, sensitive
 
 
-# ----------------------------------------------------------------------------- tokenization
+# ----------------------------------------------------------------------------- tokens and windows
 
 def token_bies_labels(offsets, spans, space: LabelSpace) -> np.ndarray:
     """BIES label per token: a token belongs to a span if its char range overlaps the span."""
@@ -131,62 +142,78 @@ def token_bies_labels(offsets, spans, space: LabelSpace) -> np.ndarray:
     return labels
 
 
-def make_windows(doc: Document, doc_index: int, max_length: int, stride: int,
-                 bos_id: int, eos_id: int, with_labels: bool = True) -> list[Window]:
+def window_bounds(n_tokens: int, max_length: int, stride: int) -> list[tuple[int, int]]:
+    """[start, end) token ranges covering a document; consecutive windows share `stride` tokens."""
     body = max_length - 2
     if body <= stride:
         raise ValueError("data.max_length - 2 must be larger than data.stride")
-    n = len(doc.token_ids)
-    starts = [0] if n <= body else list(range(0, n - stride, body - stride))
-    if starts[-1] + body < n:
-        starts.append(n - body)
-    windows = []
-    for st in starts:
-        en = min(st + body, n)
-        ids = np.concatenate([[bos_id], doc.token_ids[st:en], [eos_id]]).astype(np.int32)
-        labs = (np.concatenate([[IGNORE_INDEX], doc.token_labels[st:en], [IGNORE_INDEX]]).astype(np.int16)
-                if with_labels else None)
-        c0 = int(doc.offsets[st, 0]) if en > st else 0
-        c1 = int(doc.offsets[en - 1, 1]) if en > st else 0
-        sens = float(any(a < c1 and b > c0 for a, b in doc.sensitive_spans))
-        windows.append(Window(doc_index, st, ids, labs, sens))
-    return windows
+    if n_tokens <= body:
+        return [(0, n_tokens)]
+    starts = list(range(0, n_tokens - stride, body - stride))
+    if starts[-1] + body < n_tokens:
+        starts.append(n_tokens - body)
+    return [(s, min(s + body, n_tokens)) for s in starts]
 
 
-# ----------------------------------------------------------------------------- loading
+def doc_windows(input_ids, offset_start, offset_end, token_labels, sens_start, sens_end,
+                max_length: int, stride: int, bos_id: int, eos_id: int, with_labels: bool = True):
+    """Yield (token_start, input_ids, labels or None, sensitive) for one document."""
+    ids = np.asarray(input_ids, dtype=np.int32)
+    labs = np.asarray(token_labels, dtype=np.int16) if with_labels else None
+    for st, en in window_bounds(len(ids), max_length, stride):
+        win_ids = np.concatenate([[bos_id], ids[st:en], [eos_id]]).astype(np.int32)
+        win_labs = (np.concatenate([[IGNORE_INDEX], labs[st:en], [IGNORE_INDEX]]).astype(np.int16)
+                    if with_labels else None)
+        c0 = int(offset_start[st]) if en > st else 0
+        c1 = int(offset_end[en - 1]) if en > st else 0
+        sens = float(any(a < c1 and b > c0 for a, b in zip(sens_start, sens_end)))
+        yield st, win_ids, win_labs, sens
 
-def _read_split(path: str, locales, max_rows) -> pd.DataFrame:
-    df = pd.read_parquet(path, columns=["uid", "locale", "text", "spans"])
-    df = df[df.locale.isin(list(locales))]
-    if max_rows is not None:
-        df = df.iloc[: int(max_rows)]
-    return df.reset_index(drop=True)
+
+def _windows_batch(batch, indices, max_length, stride, bos_id, eos_id):
+    out = {k: [] for k in WINDOW_FEATURES}
+    for j, idx in enumerate(indices):
+        for st, ids, labs, sens in doc_windows(
+                batch["input_ids"][j], batch["offset_start"][j], batch["offset_end"][j],
+                batch["token_labels"][j], batch["sens_start"][j], batch["sens_end"][j],
+                max_length, stride, bos_id, eos_id):
+            out["input_ids"].append(ids)
+            out["labels"].append(labs)
+            out["sensitive"].append(sens)
+            out["doc_index"].append(idx)
+            out["token_start"].append(st)
+    return out
 
 
-def _uid_is_val(uid: str, seed: int, fraction: float) -> bool:
-    h = zlib.crc32(f"{seed}:{uid}".encode()) & 0xFFFFFFFF
-    return h / 2**32 < fraction
+def _encode_batch(batch, mapper: LabelMapper, tokenizer, space: LabelSpace):
+    out = {k: [] for k in DOC_FEATURES}
+    enc = tokenizer(batch["text"], add_special_tokens=False, return_offsets_mapping=True)
+    for j, text in enumerate(batch["text"]):
+        raw = batch["spans"][j]
+        source = ast.literal_eval(raw) if isinstance(raw, str) else list(raw)
+        # Offsets are authoritative; the span "text" field sometimes differs in case only.
+        source = [{"label": s["label"], "start": int(s["start"]), "end": int(s["end"])} for s in source]
+        spans, sensitive = mapper(text, source)
+        offsets = np.asarray(enc["offset_mapping"][j], dtype=np.int32).reshape(-1, 2)
+        out["uid"].append(batch["uid"][j])
+        out["text"].append(text)
+        out["span_type"].append([t for t, _, _ in spans])
+        out["span_start"].append([s for _, s, _ in spans])
+        out["span_end"].append([e for _, _, e in spans])
+        out["sens_start"].append([s for s, _ in sensitive])
+        out["sens_end"].append([e for _, e in sensitive])
+        out["input_ids"].append(np.asarray(enc["input_ids"][j], dtype=np.int32))
+        out["offset_start"].append(offsets[:, 0])
+        out["offset_end"].append(offsets[:, 1])
+        out["token_labels"].append(token_bies_labels(offsets, spans, space))
+    return out
 
 
-def _build_docs(df: pd.DataFrame, mapper: LabelMapper, tokenizer, space: LabelSpace,
-                batch_size: int = 1000) -> list[Document]:
-    docs = []
-    texts, uids, raws = list(df.text), list(df.uid), list(df.spans)
-    for i in range(0, len(texts), batch_size):
-        enc = tokenizer(texts[i: i + batch_size], add_special_tokens=False, return_offsets_mapping=True)
-        for j, (ids, offs) in enumerate(zip(enc["input_ids"], enc["offset_mapping"])):
-            text, raw = texts[i + j], raws[i + j]
-            source = ast.literal_eval(raw) if isinstance(raw, str) else list(raw)
-            # Offsets are authoritative; the span "text" field sometimes differs in case only.
-            source = [{"label": s["label"], "start": int(s["start"]), "end": int(s["end"])} for s in source]
-            spans, sensitive = mapper(text, source)
-            doc = Document(uids[i + j], text, spans, sensitive, ids, offs)
-            doc.token_labels = token_bies_labels(doc.offsets, spans, space)
-            docs.append(doc)
-        if (i // batch_size) % 20 == 0:
-            log.info("  tokenized %d / %d", min(i + batch_size, len(texts)), len(texts))
-    return docs
+def gold_spans(row) -> list[tuple[str, int, int]]:
+    return list(zip(row["span_type"], row["span_start"], row["span_end"]))
 
+
+# ----------------------------------------------------------------------------- building and caching
 
 def _cache_key(cfg) -> str:
     from omegaconf import OmegaConf
@@ -195,62 +222,123 @@ def _cache_key(cfg) -> str:
         "label_map": OmegaConf.to_container(cfg.label_map, resolve=True),
         "model": cfg.model.name,
         "seed": cfg.seed,
-        "version": 1,
+        "version": 2,
     }
-    for k in ("max_length", "stride"):   # windows are built on the fly; they do not change the cache
+    for k in ("max_length", "stride", "num_proc"):   # do not change the document datasets
         payload["data"].pop(k, None)
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:16]
 
 
-def load_or_build(cfg, resolve_path) -> dict:
-    """Returns {"train": [...], "val": [...], "test": [...], "space": LabelSpace, "stats": {...}}."""
-    cache = Path(resolve_path(cfg.paths.cache_dir)) / f"nemotron_{_cache_key(cfg)}.pt"
-    space = LabelSpace(tuple(cfg.label_map.target_types))
-    if cache.exists():
-        log.info("loading preprocessed data from %s", cache)
-        blob = torch.load(cache, weights_only=False)
-        blob["space"] = space
-        return blob
+def _save_atomic(ds: Dataset, target: Path) -> None:
+    """Write a dataset so an interrupted run never leaves a half-written directory behind."""
+    tmp = target.with_name(target.name + ".tmp")
+    shutil.rmtree(tmp, ignore_errors=True)
+    ds.save_to_disk(str(tmp))
+    shutil.rmtree(target, ignore_errors=True)
+    os.replace(tmp, target)
 
+
+def _read_split(path: str, locales, max_rows, num_proc) -> Dataset:
+    ds = Dataset.from_parquet(path, columns=["uid", "locale", "text", "spans"])
+    keep = set(locales)
+    ds = ds.filter(lambda b: [x in keep for x in b["locale"]], batched=True, num_proc=num_proc)
+    if max_rows is not None:
+        ds = ds.select(range(min(int(max_rows), len(ds))))
+    return ds
+
+
+def cache_root(cfg, resolve_path) -> Path:
+    return Path(resolve_path(cfg.paths.cache_dir)) / f"nemotron_{_cache_key(cfg)}"
+
+
+def load_or_build(cfg, resolve_path) -> dict:
+    """Build (once) and memory-map the train / val / test document datasets.
+
+    Returns {"train": Dataset, "val": Dataset, "test": Dataset, "space": LabelSpace,
+             "stats": dict, "root": Path}.
+    """
+    root = cache_root(cfg, resolve_path)
+    space = LabelSpace(tuple(cfg.label_map.target_types))
+    done = root / "stats.json"
+    if not done.exists():
+        _build(cfg, resolve_path, root, space)
+    else:
+        log.info("loading preprocessed datasets from %s", root)
+    out = {split: load_from_disk(str(root / split)) for split in SPLITS}
+    out.update(space=space, stats=json.loads(done.read_text()), root=root)
+    return out
+
+
+def _build(cfg, resolve_path, root: Path, space: LabelSpace) -> None:
+    num_proc = cfg.data.num_proc
     mapper = LabelMapper(cfg.label_map)
     tokenizer = AutoTokenizer.from_pretrained(cfg.model.name)
-    train_df = _read_split(resolve_path(cfg.data.train_file), cfg.data.locales, cfg.data.max_train_docs)
-    test_df = _read_split(resolve_path(cfg.data.test_file), cfg.data.locales, cfg.data.max_test_docs)
-    is_val = [_uid_is_val(u, cfg.seed, cfg.data.val_fraction) for u in train_df.uid]
-    log.info("tokenizing %d train rows and %d test rows", len(train_df), len(test_df))
-    train_docs = _build_docs(train_df, mapper, tokenizer, space)
-    test_docs = _build_docs(test_df, mapper, tokenizer, space)
-    blob = {
-        "train": [d for d, v in zip(train_docs, is_val) if not v],
-        "val": [d for d, v in zip(train_docs, is_val) if v],
-        "test": test_docs,
+    root.mkdir(parents=True, exist_ok=True)
+    raw = {
+        "train": _read_split(resolve_path(cfg.data.train_file), cfg.data.locales, cfg.data.max_train_docs, num_proc),
+        "test": _read_split(resolve_path(cfg.data.test_file), cfg.data.locales, cfg.data.max_test_docs, num_proc),
     }
-    blob["stats"] = _stats(blob, space)
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    tmp = cache.with_suffix(".tmp")
-    torch.save(blob, tmp)
-    os.replace(tmp, cache)           # atomic: an interrupted run never leaves a truncated cache
-    log.info("saved preprocessed data to %s", cache)
-    blob["space"] = space
-    return blob
+    encoded = {}
+    for name, ds in raw.items():
+        log.info("encoding %d %s rows", len(ds), name)
+        encoded[name] = ds.map(_encode_batch, batched=True, batch_size=500, num_proc=num_proc,
+                               remove_columns=ds.column_names, features=DOC_FEATURES,
+                               fn_kwargs={"mapper": mapper, "tokenizer": tokenizer, "space": space},
+                               desc=f"encode {name}")
+    seed, frac = cfg.seed, cfg.data.val_fraction
+
+    def is_val(batch):
+        return [(zlib.crc32(f"{seed}:{u}".encode()) & 0xFFFFFFFF) / 2**32 < frac for u in batch["uid"]]
+
+    flags = encoded["train"].map(lambda b: {"_val": is_val(b)}, batched=True, num_proc=num_proc,
+                                 desc="split")
+    splits = {
+        "train": flags.filter(lambda b: [not v for v in b["_val"]], batched=True).remove_columns("_val"),
+        "val": flags.filter(lambda b: b["_val"], batched=True).remove_columns("_val"),
+        "test": encoded["test"],
+    }
+    for name, ds in splits.items():
+        _save_atomic(ds, root / name)
+    stats = {name: _split_stats(load_from_disk(str(root / name)), space) for name in SPLITS}
+    (root / "stats.json").write_text(json.dumps(stats, indent=2))  # written last: marks the cache complete
+    log.info("saved preprocessed datasets to %s", root)
 
 
-def _stats(blob, space: LabelSpace) -> dict:
-    out = {}
-    for split in ("train", "val", "test"):
-        docs = blob[split]
-        by_type = {t: 0 for t in space.span_types}
-        for d in docs:
-            for t, _, _ in d.spans:
+def _split_stats(ds: Dataset, space: LabelSpace) -> dict:
+    by_type = {t: 0 for t in space.span_types}
+    n_tok = n_pii = n_sens = 0
+    uids = set()
+    for batch in ds.select_columns(["uid", "span_type", "token_labels", "sens_start"]).iter(batch_size=2000):
+        uids.update(batch["uid"])
+        for types in batch["span_type"]:
+            for t in types:
                 by_type[t] += 1
-        n_tok = int(sum(len(d.token_ids) for d in docs))
-        n_pii = int(sum(np.count_nonzero(d.token_labels) for d in docs))
-        out[split] = {
-            "docs": len(docs),
-            "uids": len({d.uid for d in docs}),
-            "tokens": n_tok,
+        for labs in batch["token_labels"]:
+            arr = np.asarray(labs)
+            n_tok += arr.size
+            n_pii += int(np.count_nonzero(arr))
+        n_sens += sum(1 for s in batch["sens_start"] if len(s))
+    return {"docs": len(ds), "uids": len(uids), "tokens": n_tok,
             "pii_token_fraction": n_pii / n_tok if n_tok else 0.0,
-            "docs_with_sensitive": sum(1 for d in docs if d.sensitive_spans),
-            "spans_by_type": by_type,
-        }
-    return out
+            "docs_with_sensitive": n_sens, "spans_by_type": by_type}
+
+
+def windows_dir(cfg, data: dict, split: str) -> Path:
+    return data["root"] / f"windows_{split}_L{cfg.data.max_length}_S{cfg.data.stride}"
+
+
+def load_windows(cfg, data: dict, splits, bos_id: int, eos_id: int) -> Dataset:
+    """Training windows for the given splits, built once per (max_length, stride) and memory-mapped."""
+    parts = []
+    for split in splits:
+        target = windows_dir(cfg, data, split)
+        if not target.exists():
+            docs = data[split]
+            win = docs.map(_windows_batch, batched=True, batch_size=500, with_indices=True,
+                           num_proc=cfg.data.num_proc, remove_columns=docs.column_names,
+                           features=WINDOW_FEATURES, desc=f"windows {split}",
+                           fn_kwargs={"max_length": int(cfg.data.max_length), "stride": int(cfg.data.stride),
+                                      "bos_id": bos_id, "eos_id": eos_id})
+            _save_atomic(win, target)
+        parts.append(load_from_disk(str(target)))
+    return parts[0] if len(parts) == 1 else concatenate_datasets(parts)

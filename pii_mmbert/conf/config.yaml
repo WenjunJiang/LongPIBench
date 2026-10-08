@@ -21,6 +21,7 @@ data:
   val_fraction: 0.1      # validation split, grouped by uid so us/intl variants stay together
   max_length: 1024       # tokens per window, including <bos>/<eos>
   stride: 256            # tokens shared by consecutive windows of a long document
+  num_proc: 4            # processes for datasets.map during preprocessing (null = 1)
 
 model:
   name: jhu-clsp/mmBERT-small
@@ -37,6 +38,7 @@ train:
   amp: true              # bf16 autocast when running on CUDA
   device: auto           # auto | cpu | cuda
   num_threads: null      # torch CPU threads (null = torch default)
+  num_workers: 0         # DataLoader worker processes
   log_every: 50          # steps between loss log lines
 
 loss:                    # PII-TRACE: L = lambda_tok * weighted CE(BIES) + lambda_sens * BCE(sensitivity)

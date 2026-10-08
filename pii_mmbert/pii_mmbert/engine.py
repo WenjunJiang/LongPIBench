@@ -7,13 +7,16 @@ import math
 import random
 import time
 from contextlib import nullcontext
+from functools import partial
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 
-from .data import Document, Window, make_windows
+from torch.utils.data import DataLoader
+
+from .data import doc_windows, gold_spans
 from .labels import IGNORE_INDEX, LabelSpace, labels_to_spans
 from .metrics import SpanScorer
 from .model import PiiTagger, class_weights, pii_trace_loss
@@ -44,17 +47,19 @@ def special_ids(model_name: str) -> tuple[int, int, int]:
     return with_special[0], with_special[-1], tok.pad_token_id
 
 
-def _collate(windows: list[Window], pad_id: int):
-    n = max(len(w.input_ids) for w in windows)
-    ids = torch.full((len(windows), n), pad_id, dtype=torch.long)
-    mask = torch.zeros((len(windows), n), dtype=torch.long)
-    labels = torch.full((len(windows), n), IGNORE_INDEX, dtype=torch.long)
-    sens = torch.tensor([w.sensitive for w in windows])
-    for i, w in enumerate(windows):
-        ids[i, : len(w.input_ids)] = torch.from_numpy(w.input_ids.astype(np.int64))
-        mask[i, : len(w.input_ids)] = 1
-        if w.labels is not None:
-            labels[i, : len(w.labels)] = torch.from_numpy(w.labels.astype(np.int64))
+def collate(rows: list[dict], pad_id: int):
+    """Pad a list of window rows ({"input_ids", "labels" (optional), "sensitive"}) into tensors."""
+    n = max(len(r["input_ids"]) for r in rows)
+    ids = torch.full((len(rows), n), pad_id, dtype=torch.long)
+    mask = torch.zeros((len(rows), n), dtype=torch.long)
+    labels = torch.full((len(rows), n), IGNORE_INDEX, dtype=torch.long)
+    sens = torch.tensor([float(r.get("sensitive", 0.0)) for r in rows])
+    for i, r in enumerate(rows):
+        k = len(r["input_ids"])
+        ids[i, :k] = torch.as_tensor(np.asarray(r["input_ids"], dtype=np.int64))
+        mask[i, :k] = 1
+        if r.get("labels") is not None:
+            labels[i, :k] = torch.as_tensor(np.asarray(r["labels"], dtype=np.int64))
     return ids, mask, labels, sens
 
 
@@ -65,51 +70,61 @@ def _autocast(device, enabled):
 
 
 @torch.no_grad()
-def predict_document(model, doc: Document, space: LabelSpace, decoder: ViterbiDecoder, cfg, device,
-                     bos_id: int, eos_id: int, pad_id: int):
-    """Average overlapping windows' log-probs per token, then one Viterbi pass over the document."""
-    n = len(doc.token_ids)
+def predict_document(model, text: str, input_ids, offset_start, offset_end, space: LabelSpace,
+                     decoder: ViterbiDecoder, cfg, device, bos_id: int, eos_id: int, pad_id: int):
+    """Average overlapping windows' log-probs per token, then one Viterbi pass over the document.
+
+    Returns (char spans [(type, start, end)], token label path).
+    """
+    n = len(input_ids)
     if n == 0:
         return [], []
-    windows = make_windows(doc, 0, cfg.data.max_length, cfg.data.stride, bos_id, eos_id, with_labels=False)
+    windows = [{"token_start": st, "input_ids": ids}
+               for st, ids, _, _ in doc_windows(input_ids, offset_start, offset_end, None, [], [],
+                                                cfg.data.max_length, cfg.data.stride, bos_id, eos_id,
+                                                with_labels=False)]
     acc = torch.full((n, space.num_labels), -math.inf)
     count = torch.zeros(n)
     bs = max(1, int(cfg.train.batch_size))
     for i in range(0, len(windows), bs):
         chunk = windows[i: i + bs]
-        ids, mask, _, _ = _collate(chunk, pad_id)
+        ids, mask, _, _ = collate(chunk, pad_id)
         with _autocast(device, cfg.train.amp):
             logits, _ = model(ids.to(device), mask.to(device))
         lp = F.log_softmax(logits.float(), dim=-1).cpu()
         for w, row in zip(chunk, lp):
-            m = len(w.input_ids) - 2
-            sl = slice(w.token_start, w.token_start + m)
+            m = len(w["input_ids"]) - 2
+            sl = slice(w["token_start"], w["token_start"] + m)
             acc[sl] = torch.logaddexp(acc[sl], row[1: 1 + m])
             count[sl] += 1
     avg = acc - torch.log(count.clamp(min=1)).unsqueeze(1)
     path = decoder.decode(avg)
     spans = []
     for typ, a, b in labels_to_spans(path, space):
-        st, en = int(doc.offsets[a, 0]), int(doc.offsets[b - 1, 1])
+        st, en = int(offset_start[a]), int(offset_end[b - 1])
         if cfg.decode.trim_whitespace:
-            while st < en and doc.text[st].isspace():
+            while st < en and text[st].isspace():
                 st += 1
-            while en > st and doc.text[en - 1].isspace():
+            while en > st and text[en - 1].isspace():
                 en -= 1
         if en > st:
             spans.append((typ, st, en))
     return spans, path
 
 
-def evaluate(model, docs: list[Document], space: LabelSpace, cfg, device, bos_id, eos_id, pad_id) -> dict:
+def evaluate(model, docs, space: LabelSpace, cfg, device, bos_id, eos_id, pad_id) -> dict:
+    """Score a document Dataset (memory-mapped; rows are read one at a time)."""
     model.eval()
     decoder = ViterbiDecoder(space, dict(cfg.decode.biases))
     limit = cfg.eval.max_docs
-    docs = docs if limit is None else docs[: int(limit)]
+    if limit is not None:
+        docs = docs.select(range(min(int(limit), len(docs))))
     scorer = SpanScorer(space.span_types)
-    for doc in docs:
-        pred_spans, path = predict_document(model, doc, space, decoder, cfg, device, bos_id, eos_id, pad_id)
-        scorer.add(doc.spans, pred_spans, doc.token_labels.tolist(), path)
+    for row in docs:
+        pred_spans, path = predict_document(model, row["text"], row["input_ids"], row["offset_start"],
+                                            row["offset_end"], space, decoder, cfg, device,
+                                            bos_id, eos_id, pad_id)
+        scorer.add(gold_spans(row), pred_spans, row["token_labels"], path)
     return scorer.result()
 
 
@@ -133,31 +148,34 @@ def build_model_and_optim(cfg, space: LabelSpace, steps: int, device):
     return model, optim, sched
 
 
-def train(cfg, train_docs: list[Document], space: LabelSpace, eval_docs=None, eval_prefix="val",
-          report=None):
-    """Train for cfg.train.epochs; after each epoch evaluate on eval_docs (if given) and call report."""
+def train(cfg, windows, space: LabelSpace, eval_docs=None, eval_prefix="val", report=None):
+    """Train on a window Dataset for cfg.train.epochs.
+
+    After each epoch, evaluate on the document Dataset `eval_docs` (if given) and call `report`.
+    """
     set_seed(cfg.seed)
     if cfg.train.num_threads:
         torch.set_num_threads(int(cfg.train.num_threads))
     device = pick_device(cfg.train.device)
     bos_id, eos_id, pad_id = special_ids(cfg.model.name)
-    windows = [w for i, d in enumerate(train_docs)
-               for w in make_windows(d, i, cfg.data.max_length, cfg.data.stride, bos_id, eos_id)]
     bs = int(cfg.train.batch_size)
-    steps_per_epoch = math.ceil(len(windows) / bs)
+    loader = DataLoader(
+        windows.with_format("numpy", columns=["input_ids", "labels", "sensitive"]),
+        batch_size=bs, shuffle=True, drop_last=False, num_workers=int(cfg.train.num_workers),
+        generator=torch.Generator().manual_seed(int(cfg.seed)),
+        collate_fn=partial(collate, pad_id=pad_id),
+    )
+    steps_per_epoch = len(loader)
     total = steps_per_epoch * int(cfg.train.epochs)
     model, optim, sched = build_model_and_optim(cfg, space, total, device)
     weights = class_weights(space, cfg.loss.background_weight)
-    log.info("training on %d docs / %d windows, %d steps, device=%s", len(train_docs), len(windows), total, device)
+    log.info("training on %d windows, %d steps, device=%s", len(windows), total, device)
 
-    rng = random.Random(cfg.seed)
     metrics: dict = {}
     for epoch in range(int(cfg.train.epochs)):
         model.train()
-        rng.shuffle(windows)
         t0, run_loss, run_tag, run_sens = time.time(), 0.0, 0.0, 0.0
-        for step in range(steps_per_epoch):
-            ids, mask, labels, sens = _collate(windows[step * bs: (step + 1) * bs], pad_id)
+        for step, (ids, mask, labels, sens) in enumerate(loader):
             ids, mask, labels, sens = ids.to(device), mask.to(device), labels.to(device), sens.to(device)
             with _autocast(device, cfg.train.amp):
                 logits, sens_logit = model(ids, mask)

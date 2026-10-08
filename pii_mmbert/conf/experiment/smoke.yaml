@@ -10,6 +10,7 @@ data:
   val_fraction: 0.2
   max_length: 256
   stride: 64
+  num_proc: 2
 
 train:
   epochs: 2
