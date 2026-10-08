@@ -19,7 +19,7 @@ conf/experiment/smoke.yaml               tiny CPU run used to check the pipeline
 main.py                                  Hydra entry point (stage=preprocess|tune|final|predict)
 pii_mmbert/labels.py                     BIES label space, labels -> spans
 pii_mmbert/viterbi.py                    constrained Viterbi (OPF semantics)
-pii_mmbert/data.py                       loading, label mapping, tokenization, windows, cache
+pii_mmbert/data.py                       label mapping, tokenization, windows; Hugging Face datasets cache
 pii_mmbert/model.py                      encoder + tag head + sensitivity head, PII-TRACE loss
 pii_mmbert/engine.py                     training loop, document-level evaluation
 pii_mmbert/metrics.py                    span and token metrics
@@ -83,6 +83,11 @@ Outputs:
   offsets are used as-is.
 - **Splits**: each Nemotron uid appears twice (us and intl locale). The validation split is grouped by uid
   so the two variants never land on different sides.
+- **Storage**: preprocessed documents and training windows are Hugging Face `datasets` written with
+  `save_to_disk` under `cache/nemotron_<hash>/` (`train`, `val`, `test`, `windows_<split>_L<len>_S<stride>`).
+  They are memory-mapped with `load_from_disk`, so training and evaluation read rows on demand, and Ray Tune
+  trials receive dataset directories rather than copies of the data. `stats.json` is written last and marks
+  the cache as complete; every directory is written to a `.tmp` path and renamed when done.
 - **Long documents**: windows of `data.max_length` tokens with `data.stride` overlap. At evaluation, overlapping
   windows' log-probabilities are averaged per token and Viterbi runs once over the whole document (as OPF does).
 - **Sensitivity head**: target = whether the window contains a span whose source label is in
@@ -94,8 +99,10 @@ Outputs:
 
 - `pytest`: label mapping, merging, BIES round trip, windowing; Viterbi paths identical to OPF's
   `ViterbiCRFDecoder` on 30 random inputs with random biases (run with the OPF package installed).
-- `stage=preprocess` on all 200k rows: 7.5 min, peak RSS 7.4 GB, 1.1 GB cache. Splits: train 89,980 rows /
-  44,990 uids, val 10,020 / 5,010, test 100,000 / 50,000; 17.3% of tokens are PII.
+- `stage=preprocess` on all 200k rows with `data.num_proc=4`: 1.9 min, peak RSS 2.05 GB in the main
+  process and at most 1.0 GB per worker, 0.93 GB on disk. (The earlier pickled-numpy cache took 7.5 min and
+  7.4 GB.) Splits: train 89,980 rows / 44,990 uids, val 10,020 / 5,010, test 100,000 / 50,000; 17.3% of
+  tokens are PII.
 - `+experiment=smoke` (240 rows, 256-token windows): `stage=tune` ran 2 trials with ASHA stopping one after
   epoch 1; `stage=final` applied `best_params.json` and the command-line `train.batch_size=8` on top;
   `stage=predict` returned JSON spans. Smoke numbers only show the pipeline runs; they are not a quality
