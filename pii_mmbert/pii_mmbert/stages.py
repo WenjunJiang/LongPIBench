@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 
 from omegaconf import DictConfig, OmegaConf
@@ -97,7 +98,11 @@ def run_tune(cfg, resolve_path) -> dict:
                              val_dir=str(data["root"] / "val")),
         {"cpu": res.get("cpu", 1), "gpu": res.get("gpu", 0)},
     )
-    ray.init(ignore_reinit_error=True, include_dashboard=False)
+    # Trial workers import pii_mmbert from the project directory (the package is not pip-installed).
+    project_dir = str(Path(__file__).resolve().parents[1])
+    pythonpath = os.pathsep.join(p for p in (project_dir, os.environ.get("PYTHONPATH")) if p)
+    ray.init(ignore_reinit_error=True, include_dashboard=False,
+             runtime_env={"env_vars": {"PYTHONPATH": pythonpath}})
     tuner = tune.Tuner(
         trainable,
         param_space=build_search_space(OmegaConf.to_container(cfg.tune.search_space, resolve=True)),

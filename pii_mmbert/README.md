@@ -26,6 +26,8 @@ pii_mmbert/metrics.py                    span and token metrics
 pii_mmbert/calibration.py                Platt scaling, F-beta thresholds, ECE
 pii_mmbert/stages.py                     preprocess / Ray Tune / final / calibrate / predict
 tests/                                   mapping, BIES, windows, Viterbi-vs-OPF tests
+requirements.txt                         dependencies (pip install -r requirements.txt)
+pytest.ini                               puts this directory on sys.path for the tests
 ```
 
 ## Setup
@@ -33,7 +35,7 @@ tests/                                   mapping, BIES, windows, Viterbi-vs-OPF 
 ```bash
 python -m venv .venv && . .venv/bin/activate
 pip install torch            # pick the CUDA build for GPU machines
-pip install -e ".[test]"
+pip install -r requirements.txt
 mkdir -p data_raw
 for s in train test; do
   curl -L -o data_raw/$s.parquet \
@@ -41,6 +43,10 @@ for s in train test; do
 done
 pytest -q
 ```
+
+The package is not pip-installed. Run every command from this directory: `python main.py` imports
+`pii_mmbert` from here, `pytest.ini` does the same for the tests, and `stage=tune` passes this directory to
+the Ray Tune workers through `PYTHONPATH`.
 
 ## Running
 
