@@ -89,3 +89,15 @@ Outputs:
   `sensitive_source_labels` (special-category data). Set `loss.lambda_sens=0` to train without it.
 - **Metrics**: exact typed span P/R/F1 on character offsets (primary, `span_f1`), token-level PII-vs-O detection,
   per-type span F1, and the share of PII-free documents with any prediction.
+
+## Verified in this repo (CPU, 4 vCPU, no GPU)
+
+- `pytest`: label mapping, merging, BIES round trip, windowing; Viterbi paths identical to OPF's
+  `ViterbiCRFDecoder` on 30 random inputs with random biases (run with the OPF package installed).
+- `stage=preprocess` on all 200k rows: 7.5 min, peak RSS 7.4 GB, 1.1 GB cache. Splits: train 89,980 rows /
+  44,990 uids, val 10,020 / 5,010, test 100,000 / 50,000; 17.3% of tokens are PII.
+- `+experiment=smoke` (240 rows, 256-token windows): `stage=tune` ran 2 trials with ASHA stopping one after
+  epoch 1; `stage=final` applied `best_params.json` and the command-line `train.batch_size=8` on top;
+  `stage=predict` returned JSON spans. Smoke numbers only show the pipeline runs; they are not a quality
+  result.
+- A full run needs a GPU: the smoke epoch took ~190 s for 328 windows of 256 tokens on 2 CPU threads.
