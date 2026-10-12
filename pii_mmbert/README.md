@@ -117,7 +117,12 @@ Outputs:
   trials receive dataset directories rather than copies of the data. `stats.json` is written last and marks
   the cache as complete; every directory is written to a `.tmp` path and renamed when done.
 - **Long documents**: windows of `data.max_length` tokens with `data.stride` overlap. At evaluation, overlapping
-  windows' log-probabilities are averaged per token and Viterbi runs once over the whole document (as OPF does).
+  windows' log-probabilities are averaged per token and Viterbi runs once over the whole document. OPF uses the
+  same per-token aggregation and single Viterbi pass, but its windows do not overlap (`example_to_windows` uses
+  stride = window size, with `n_ctx` 128,000 by default on GPU and 4,096 on CPU). OPF can afford that because each
+  token only attends to 128 tokens on either side. mmBERT has a global-attention layer every third layer, so the
+  window length changes what each token sees. With mmBERT's tokenizer, 98.9% of Nemotron training documents fit
+  in one 1024-token window (p50 205, p99 1034 tokens).
 - **Sensitivity head**: target = whether the window contains a span whose source label is in
   `sensitive_source_labels` (special-category data). Set `loss.lambda_sens=0` to train without it.
 - **Metrics**: exact typed span P/R/F1 on character offsets (primary, `span_f1`), token-level PII-vs-O detection,
