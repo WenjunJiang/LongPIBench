@@ -42,6 +42,14 @@ def test_background_labels_and_sensitive(mapper):
     assert sens == [(t.index("Buddhist"), t.index("Buddhist") + 8)]
 
 
+def test_sensitive_labels_are_attributes_not_identifiers(mapper):
+    t = "Kim, 34, female, MRN 99812."
+    spans, sens = mapper(t, [_span(t, "Kim", "first_name"), _span(t, "34", "age"),
+                             _span(t, "female", "gender"), _span(t, "99812", "medical_record_number")])
+    assert spans == [("private_person", 0, 3), ("account_number", t.index("99812"), t.index("99812") + 5)]
+    assert sens == [(t.index("34"), t.index("34") + 2), (t.index("female"), t.index("female") + 6)]
+
+
 def test_unknown_label_fails(mapper):
     with pytest.raises(ValueError, match="missing from label_map"):
         mapper("x", [{"label": "not_a_label", "start": 0, "end": 1}])

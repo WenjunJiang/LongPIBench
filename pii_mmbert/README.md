@@ -124,7 +124,11 @@ Outputs:
   window length changes what each token sees. With mmBERT's tokenizer, 98.9% of Nemotron training documents fit
   in one 1024-token window (p50 205, p99 1034 tokens).
 - **Sensitivity head**: target = whether the window contains a span whose source label is in
-  `sensitive_source_labels` (special-category data). Set `loss.lambda_sens=0` to train without it.
+  `sensitive_source_labels`. The list follows PII-TRACE's sensitive-attribute layer: race/ethnicity, religion,
+  political view, sexuality, age, gender, and blood type (Nemotron has no health-condition or disability label).
+  These are attributes, not identifiers, so the tag head labels them `O` and only the sensitivity head sees them.
+  Set `loss.lambda_sens=0` to train without it. With this list 20.5% of training documents are sensitive
+  (train 17,448 / 84,950; calib 19.6%; test 25.8%).
 - **Metrics**: exact typed span P/R/F1 on character offsets (primary, `span_f1`), token-level PII-vs-O detection,
   per-type span F1, and the share of PII-free documents with any prediction.
 

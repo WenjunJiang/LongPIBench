@@ -101,14 +101,17 @@ merge:
   max_gap_chars: 3
   gap_pattern: "^[\\s,]*$"
 
-# Source labels that mark a window as sensitive for the auxiliary sensitivity head
-# (PII-TRACE trains a sensitivity head on special-category content as an auxiliary signal).
+# Source labels that mark a window as sensitive for the auxiliary sensitivity head.
+# Follows PII-TRACE's separate sensitive-attribute layer (arXiv 2609.22200, appendix B: health condition,
+# religion, race/ethnicity, sexuality, political view, disability, age, gender), which is kept apart from
+# the identifier types. Nemotron has no health-condition or disability label; blood_type is the closest
+# health attribute. Identifiers (medical record number, health plan id, biometric id) are left out: the tag
+# head already labels them as account_number, so they would only repeat the PII signal.
 sensitive_source_labels:
   - race_ethnicity
   - religious_belief
   - political_view
   - sexuality
+  - age
+  - gender
   - blood_type
-  - medical_record_number
-  - health_plan_beneficiary_number
-  - biometric_identifier
