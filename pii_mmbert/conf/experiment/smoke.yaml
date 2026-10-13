@@ -31,6 +31,7 @@ tune:
   resources_per_trial:
     cpu: 2
     gpu: 0
+  accelerator_type: null
 
 calibration:
   min_spans_per_type: 10

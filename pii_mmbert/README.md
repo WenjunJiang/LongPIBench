@@ -62,7 +62,8 @@ python main.py stage=preprocess
 
 # 2. Hyperparameter search with Ray Tune (search space and ranges: tune.search_space in config.yaml)
 python main.py stage=tune
-python main.py stage=tune tune.num_samples=32 tune.resources_per_trial.gpu=1 train.epochs=4
+python main.py stage=tune tune.num_samples=32 tune.max_concurrent_trials=4 train.epochs=4
+python main.py stage=tune tune.accelerator_type=GeForce-RTX-4090   # or null for any GPU
 
 # 3. Final model: defaults < tuned best params < command-line overrides
 python main.py stage=final final.best_params_path=outputs/tune/best_params.json
@@ -159,6 +160,14 @@ Outputs:
   P/R/F1 (`span_overlap_*`: same type, at least one shared character), which separates boundary conventions
   from missed or invented spans; token-level PII-vs-O detection; per-type span P/R/F1 with gold and
   predicted counts; and the share of PII-free documents with any prediction.
+- **Ray Tune resources**: each trial requests `tune.resources_per_trial` (default 4 CPUs and 0.25 GPU, so
+  up to four trials could share a card; `tune.max_concurrent_trials: 2` runs two at a time). Fractional GPUs
+  share the card's memory, so lower `train.batch_size` if two trials run out of memory together.
+  `tune.accelerator_type` restricts trials to one GPU model. Ray names models from the device name
+  ("GeForce-RTX-4090", "RTX-A6000", "A100"), so the setting may be the exact name or a substring that
+  matches exactly one model in the cluster; otherwise the stage stops with the list of available names
+  instead of leaving every trial PENDING. Each trial requests 0.01 of `accelerator_type:<name>`: a node has
+  1.0 of it in total, so a request of 1 would allow only one trial per node.
 - **Evaluation subsets**: `eval.max_docs` takes a seeded random sample (`data.subset`), not the first rows:
   Nemotron's test file lists all 50,000 `us` rows before the `intl` rows. Any two evaluations with the same
   `eval.max_docs` and `seed` score the same documents.

@@ -52,6 +52,36 @@ def apply_params(cfg: DictConfig, params: dict) -> DictConfig:
     return cfg
 
 
+ACCELERATOR_PREFIX = "accelerator_type:"
+ACCELERATOR_SHARE = 0.01   # per trial; Ray gives each node 1.0 of its accelerator_type resource in total
+
+
+def resolve_accelerator_type(wanted: str, cluster_resources: dict) -> str:
+    """Full Ray accelerator type name for `wanted`: an exact name, or a substring matching exactly one
+    of the cluster's types (Ray names GPUs like "GeForce-RTX-4090", "RTX-A6000", "A100")."""
+    available = sorted(k[len(ACCELERATOR_PREFIX):] for k in cluster_resources if k.startswith(ACCELERATOR_PREFIX))
+    if wanted in available:
+        return wanted
+    hits = [a for a in available if wanted.lower() in a.lower()]
+    if len(hits) == 1:
+        return hits[0]
+    raise ValueError(f"tune.accelerator_type={wanted!r} matches {hits or 'none'} of the accelerator types in "
+                     f"this Ray cluster: {available or 'none (no GPU detected)'}; set the exact name")
+
+
+def trial_resources(tune_cfg, cluster_resources: dict) -> dict:
+    """Resource request of one trial: tune.resources_per_trial plus, if tune.accelerator_type is set, a
+    small share of that accelerator type. Each node has 1.0 of accelerator_type:<name>, so requesting 1
+    per trial would allow only one trial per node regardless of the GPU fraction."""
+    res = {k: float(v) for k, v in tune_cfg.resources_per_trial.items()}
+    res.setdefault("cpu", 1.0)
+    res.setdefault("gpu", 0.0)
+    if tune_cfg.get("accelerator_type"):
+        name = resolve_accelerator_type(str(tune_cfg.accelerator_type), cluster_resources)
+        res[ACCELERATOR_PREFIX + name] = ACCELERATOR_SHARE
+    return res
+
+
 def _clean(metrics: dict) -> dict:
     return {k: v for k, v in metrics.items() if v is not None}
 
@@ -94,18 +124,19 @@ def run_tune(cfg, resolve_path) -> dict:
     scheduler = ASHAScheduler(time_attr="epoch", max_t=int(cfg.train.epochs),
                               grace_period=int(cfg.tune.scheduler.grace_period),
                               reduction_factor=int(cfg.tune.scheduler.reduction_factor))
-    res = dict(cfg.tune.resources_per_trial)
-    trainable = tune.with_resources(
-        tune.with_parameters(_tune_trial, base_cfg=base_cfg,
-                             windows_dir=str(windows_dir(cfg, data, "train")),
-                             val_dir=str(data["root"] / "val")),
-        {"cpu": res.get("cpu", 1), "gpu": res.get("gpu", 0)},
-    )
     # Trial workers import pii_mmbert from the project directory (the package is not pip-installed).
     project_dir = str(Path(__file__).resolve().parents[1])
     pythonpath = os.pathsep.join(p for p in (project_dir, os.environ.get("PYTHONPATH")) if p)
     ray.init(ignore_reinit_error=True, include_dashboard=False,
              runtime_env={"env_vars": {"PYTHONPATH": pythonpath}})
+    resources = trial_resources(cfg.tune, ray.cluster_resources())
+    log.info("resources per trial: %s, max concurrent trials: %s", resources, cfg.tune.max_concurrent_trials)
+    trainable = tune.with_resources(
+        tune.with_parameters(_tune_trial, base_cfg=base_cfg,
+                             windows_dir=str(windows_dir(cfg, data, "train")),
+                             val_dir=str(data["root"] / "val")),
+        resources,
+    )
     tuner = tune.Tuner(
         trainable,
         param_space=build_search_space(OmegaConf.to_container(cfg.tune.search_space, resolve=True)),
