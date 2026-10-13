@@ -58,9 +58,13 @@ python -c "import opf; print(opf.__file__)"                         # check
 ```
 
 - Dependencies it adds: `tiktoken`, `safetensors`, `huggingface_hub` (torch and numpy are already installed).
-- Checkpoint (~2.8 GB): OPF reads it from `$OPF_CHECKPOINT`, else `~/.opf/privacy_filter`, and downloads it
-  there on first use. To use a copy elsewhere, set `OPF_CHECKPOINT` or `baseline.opf.checkpoint=/path/to/dir`.
-  On machines without internet access, copy that directory over beforehand.
+- Checkpoint (~2.8 GB): by default OPF uses `$OPF_CHECKPOINT`, else `~/.opf/privacy_filter`, and downloads
+  automatically only to `~/.opf/privacy_filter`. If the home directory is not writable (shared notebook
+  servers), set `baseline.opf.checkpoint` to a writable directory, e.g.
+  `python main.py stage=baseline_opf baseline.opf.checkpoint=/data/<you>/opf_checkpoint`: when the directory
+  holds no checkpoint, this stage downloads the same files from `openai/privacy-filter` (`original/*`) into it,
+  with the Hugging Face xet chunk cache inside it too (unless `HF_XET_CACHE` is set), and reuses it afterwards.
+  On machines without internet access, copy a checkpoint directory over beforehand.
 - On GPU, OPF's mixture-of-experts layer uses Triton kernels. The CUDA builds of torch on Linux normally
   install `triton`; if OPF reports that `triton` is missing, `pip install triton`.
 
