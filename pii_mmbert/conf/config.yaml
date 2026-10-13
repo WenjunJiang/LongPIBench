@@ -118,8 +118,7 @@ calibration:             # stage=calibrate, all on the calib split: 1) Viterbi b
 
 baseline:                # stage=baseline_opf: OpenAI Privacy Filter on the same test docs (eval.max_docs sample)
   opf:
-    checkpoint: null     # null = OPF's default ~/.opf/privacy_filter (or $OPF_CHECKPOINT). A path is used
-                         # as the checkpoint directory and downloaded into if it holds no checkpoint yet.
+    checkpoint: null     # null = OPF's default checkpoint location (downloaded on first use)
     device: auto         # auto | cpu | cuda
     context_window_length: null   # null = OPF default (128,000 tokens on GPU, 4,096 on CPU)
     output_name: baseline_opf     # outputs/<name>/: run.json, predictions.jsonl (resumable), metrics.json

@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import time
 from pathlib import Path
 
@@ -26,39 +25,6 @@ from .data import gold_spans, load_or_build, subset, token_bies_labels
 from .metrics import SpanScorer
 
 log = logging.getLogger(__name__)
-
-
-OPF_HF_REPO = "openai/privacy-filter"
-
-
-def opf_checkpoint_dir(path: Path) -> Path:
-    """Checkpoint directory for OPF(model=...), downloading it into `path` when absent.
-
-    OPF downloads automatically only to its fixed default (~/.opf/privacy_filter); an explicit path must
-    already hold a checkpoint. This fetches the same files OPF fetches (the repo's original/ folder) into
-    `path`, for machines where the home directory is not writable. Accepts a checkpoint directory itself
-    or a download directory that contains original/.
-    """
-    for cand in (path, path / "original"):
-        if (cand / "config.json").is_file() and any(cand.glob("*.safetensors")):
-            return cand
-    from huggingface_hub import snapshot_download
-    log.info("OPF checkpoint not found in %s; downloading %s (original/*, ~2.8 GB)", path, OPF_HF_REPO)
-    path.mkdir(parents=True, exist_ok=True)
-    # Large files go through hf_xet, which caches chunks under $HF_XET_CACHE (default ~/.cache/huggingface/xet)
-    # and fails when the home directory is not writable. Unless set by the user, keep that cache in `path`.
-    xet_default = "HF_XET_CACHE" not in os.environ
-    if xet_default:
-        os.environ["HF_XET_CACHE"] = str(path / ".cache" / "xet")
-    try:
-        snapshot_download(repo_id=OPF_HF_REPO, local_dir=str(path), allow_patterns=["original/*"])
-    finally:
-        if xet_default:
-            os.environ.pop("HF_XET_CACHE", None)
-    cand = path / "original"
-    if not (cand / "config.json").is_file():
-        raise RuntimeError(f"download finished but {cand} has no config.json")
-    return cand
 
 
 def _read_done(pred_path: Path) -> dict[int, dict]:
@@ -103,7 +69,7 @@ def run_opf_baseline(cfg, resolve_path) -> dict:
 
     kwargs = {"device": device}
     if bcfg.checkpoint:
-        kwargs["model"] = str(opf_checkpoint_dir(Path(resolve_path(bcfg.checkpoint))))
+        kwargs["model"] = str(resolve_path(bcfg.checkpoint))
     if bcfg.context_window_length:
         kwargs["context_window_length"] = int(bcfg.context_window_length)
     redactor = OPF(**kwargs)
