@@ -98,6 +98,7 @@ calibration:             # stage=calibrate, all on the calib split: 1) Viterbi b
   bias_search:
     enabled: true
     num_samples: 100     # random candidates; trial 0 is always decode.biases
+    min_improvement: 0.005   # keep decode.biases unless the best candidate gains at least this much F-beta
     # Same format as tune.search_space, keyed by bias name. Unlisted biases keep their decode.biases
     # value. background_stay is left out: adding one constant to all six biases changes no path.
     search_space:

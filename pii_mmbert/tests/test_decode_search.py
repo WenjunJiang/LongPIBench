@@ -31,7 +31,7 @@ def test_search_finds_start_bias_that_recovers_missed_span():
     space = LabelSpace(("private_person",))
     cache = _cache(space)
     assert decode_cache(cache, space, {}, True)[0].spans == []
-    cfg = OmegaConf.create({"num_samples": 3, "search_space": [
+    cfg = OmegaConf.create({"num_samples": 3, "min_improvement": 0.005, "search_space": [
         {"param": "transition_bias_background_to_start", "type": "uniform", "lower": 0.5, "upper": 2.0}]})
     biases, report = search_biases(cache, space, {}, cfg, beta=1.0, trim_whitespace=True, seed=0)
     assert report["baseline"]["f_beta"] == 0.0 and report["best"]["f_beta"] == 1.0
@@ -42,8 +42,17 @@ def test_search_finds_start_bias_that_recovers_missed_span():
 def test_search_keeps_baseline_when_nothing_beats_it():
     space = LabelSpace(("private_person",))
     cache = _cache(space)
-    cfg = OmegaConf.create({"num_samples": 3, "search_space": [
+    cfg = OmegaConf.create({"num_samples": 3, "min_improvement": 0.005, "search_space": [
         {"param": "transition_bias_background_to_start", "type": "uniform", "lower": -3.0, "upper": -1.0}]})
     biases, report = search_biases(cache, space, {"transition_bias_background_to_start": 1.0}, cfg,
                                    beta=1.0, trim_whitespace=True, seed=0)
     assert biases == {"transition_bias_background_to_start": 1.0} and report["best"]["trial"] == 0
+
+
+def test_small_gain_keeps_baseline():
+    space = LabelSpace(("private_person",))
+    cache = _cache(space)
+    cfg = OmegaConf.create({"num_samples": 3, "min_improvement": 1.5, "search_space": [
+        {"param": "transition_bias_background_to_start", "type": "uniform", "lower": 0.5, "upper": 2.0}]})
+    biases, report = search_biases(cache, space, {}, cfg, beta=1.0, trim_whitespace=True, seed=0)
+    assert report["best"]["f_beta"] == 1.0 and not report["accepted"] and biases == {}

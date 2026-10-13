@@ -112,7 +112,10 @@ Outputs:
      by the best F-beta it reaches with one global threshold on raw span scores, because thresholds are
      applied afterwards: judging at threshold 0 would favour conservative biases and give up recall a
      threshold could keep. Random search over `calibration.bias_search.search_space`; trial 0 is always
-     `decode.biases`, so the result never scores below it on calib. `background_stay` is not searched:
+     `decode.biases`, and the best candidate replaces it only if it gains at least
+     `calibration.bias_search.min_improvement` F-beta (default 0.005). Picking the maximum of many
+     candidates favours lucky ones: on the 41-document smoke calib split, biases of about ±2 scored 0.003
+     higher than all-zero biases on calib and lower on test. `background_stay` is not searched:
      every legal transition gets exactly one bias, so adding one constant to all six changes no path.
   2. *Platt and thresholds* (`pii_mmbert/calibration.py`), fitted on the spans decoded with the chosen biases.
      Raw span score = mean probability of the decoded labels over the span's tokens; target = the span
@@ -164,7 +167,14 @@ Outputs:
 - After moving to `datasets`, the smoke `tune` → `final` → `predict` run was repeated and all stages passed.
   Ray Tune's random search is seeded from `seed` (`BasicVariantGenerator(random_state=seed)`); two Tuner
   runs with the same seed drew identical configurations.
-- `stage=calibrate` on the smoke model (41 calib rows): span ECE 0.105 → 0.046 on calib and
-  0.115 → 0.077 on test; thresholds raised test span precision 0.17 → 0.50 at unchanged recall. The smoke
-  model is undertrained (34 steps), so only the mechanics are meaningful here.
+- After removing the sensitivity head (plain token CE, bias search in `stage=calibrate`), the whole smoke
+  pipeline `preprocess` → `tune` → `final` → `calibrate` → `predict` was rerun and every stage passed. On the
+  41-document calib split the best of 17 bias candidates beat all-zero biases by 0.003 F1; without the
+  `min_improvement` margin it was taken and test span F1 went 0.959 → 0.954 (biases) → 0.949 (thresholds),
+  so the margin was added and the rerun kept all-zero biases (test F1 0.959). Platt lowered span ECE
+  0.053 → 0.040 on calib and 0.059 → 0.039 on test. `stage=predict` decoded with the biases stored in
+  `calibration.json`.
+- Batched Viterbi returns the same paths as per-document decoding (`tests/test_viterbi.py`). On one CPU thread
+  it took 2.0 ms per document of ~240 tokens vs 3.5 ms unbatched, i.e. ~10 s per bias candidate on 5,030
+  calib documents.
 - A full run needs a GPU: the smoke epoch took ~190 s for 328 windows of 256 tokens on 2 CPU threads.

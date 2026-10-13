@@ -72,8 +72,12 @@ def score_biases(cache: list[dict], space: LabelSpace, biases: dict, beta: float
 
 def search_biases(cache: list[dict], space: LabelSpace, base_biases: dict, cfg_search, beta: float,
                   trim_whitespace: bool, seed: int) -> tuple[dict, dict]:
-    """Random search around base_biases; the base setting is always trial 0, so the chosen biases
-    never score below it on the calib split. Returns (biases, report)."""
+    """Random search around base_biases; the base setting is always trial 0.
+
+    The best candidate replaces the base only if it beats it by at least cfg_search.min_improvement
+    (F-beta). Taking the maximum over many candidates on a finite split favours lucky ones; without this
+    margin, a 41-document smoke split picked biases of +-2 that scored 0.003 higher on calib and lower
+    on test. Returns (biases, report)."""
     entries = list(cfg_search.search_space)
     unknown = {e["param"] for e in entries} - set(BIAS_KEYS)
     if unknown:
@@ -89,7 +93,14 @@ def search_biases(cache: list[dict], space: LabelSpace, base_biases: dict, cfg_s
             log.info("bias search %d/%d: best F-beta so far %.4f", i + 1, len(candidates),
                      max(t["f_beta"] for t in trials))
     best = max(trials, key=lambda t: (t["f_beta"], -t["trial"]))   # ties keep the earlier trial
+    min_gain = float(cfg_search.min_improvement)
+    accepted = best["f_beta"] - trials[0]["f_beta"] >= min_gain and best["trial"] != 0
+    chosen = best if accepted else trials[0]
     ranked = sorted(trials, key=lambda t: (-t["f_beta"], t["trial"]))
-    report = {"enabled": True, "beta": beta, "trials": len(trials), "baseline": trials[0],
-              "best": best, "top": ranked[:5]}
-    return dict(best["biases"]), report
+    report = {"enabled": True, "beta": beta, "trials": len(trials), "min_improvement": min_gain,
+              "accepted": accepted, "baseline": trials[0], "best": best, "chosen_trial": chosen["trial"],
+              "top": ranked[:5]}
+    if not accepted:
+        log.info("best candidate gains %.4f F-beta over decode.biases (< %.4f): keeping decode.biases",
+                 best["f_beta"] - trials[0]["f_beta"], min_gain)
+    return dict(chosen["biases"]), report
