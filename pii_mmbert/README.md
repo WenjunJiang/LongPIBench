@@ -168,11 +168,7 @@ Outputs:
   shipped operating point, whitespace trimming). Differences in labelling conventions count against it:
   for example Nemotron's generic `date` and lone city/country mentions are background in our mapping, while
   OPF may tag them. Per-type and overlap metrics show where the disagreement is.
-  - On CPU, OPF's mixture-of-experts layer gathers each token's expert weights per token. With
-    `baseline.opf.cpu_grouped_moe=true` (default) each expert is applied once to all its tokens, as OPF's
-    GPU kernel does: 0.74 s instead of 16.2 s per test document on 4 vCPUs. The bf16 residual stream makes
-    the result differ slightly from OPF's CPU path (mean |Δp| ~1e-5, no argmax change on 12 documents; one
-    of the 12 had one span more or less after Viterbi). Set it to false to run OPF's code unchanged.
+  - Run it on a GPU: on 4 vCPUs OPF took ~16 s per test document.
 
 ## Verified in this repo (CPU, 4 vCPU, no GPU)
 

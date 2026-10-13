@@ -8,16 +8,11 @@ OPF runs with its own defaults (constrained Viterbi with its shipped operating p
 context window from the checkpoint). Predictions are appended to a JSONL file as they are produced, so an
 interrupted run resumes where it stopped.
 
-On CPU, OPF's mixture-of-experts layer copies the weights of each token's experts per token, which makes
-it ~20x slower than necessary. With baseline.opf.cpu_grouped_moe=true the layer is replaced by one that
-applies each expert once to all tokens routed to it (the same arithmetic, grouped like OPF's GPU kernel).
-The residual stream is bf16, so the different summation order changes probabilities slightly (mean
-|dp| ~1e-5 on 12 test documents, no argmax change); compare on a sample with cpu_grouped_moe=false.
+OPF is slow on CPU (~16 s per test document on 4 vCPUs); run this stage on a GPU.
 """
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import time
@@ -25,48 +20,11 @@ from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
 from .data import gold_spans, load_or_build, subset, token_bies_labels
 from .metrics import SpanScorer
 
 log = logging.getLogger(__name__)
-
-
-def _grouped_moe_forward(self, x):
-    """Drop-in for opf._model.model.MLPBlock.forward (torch path): same routing, weights and SwiGLU,
-    but each expert is applied once to all of its tokens instead of gathering weights per token."""
-    from opf._model.model import swiglu
-    batch_shape = x.shape[:-1]
-    t = self.norm(x).reshape(-1, x.shape[-1])
-    g = F.linear(t.float(), self.gate.weight.float(), self.gate.bias.float())
-    experts = torch.topk(g, k=self.experts_per_token, dim=-1, sorted=True)
-    weights = torch.softmax(experts.values, dim=1) / self.experts_per_token
-    idx = experts.indices
-    n, k = idx.shape
-    tf = t.float()
-    out = torch.zeros((n, k, t.shape[1]), dtype=torch.float32, device=t.device)
-    flat = idx.reshape(-1)
-    for e in torch.unique(flat).tolist():
-        pos = (flat == e).nonzero().squeeze(1)
-        tok, slot = pos // k, pos % k
-        h = tf[tok] @ self.mlp1_weight[e].float() + self.mlp1_bias[e].float()
-        h = swiglu(h, limit=self.swiglu_limit, packed=self.packed_geglu)
-        out[tok, slot] = h @ self.mlp2_weight[e].float() + self.mlp2_bias[e].float()
-    out = torch.einsum("bec,be->bc", out, weights.to(out.dtype)) * self.experts_per_token
-    return x + out.to(x.dtype).reshape(*batch_shape, -1)
-
-
-@contextlib.contextmanager
-def _grouped_moe(enabled: bool):
-    from opf._model import model as opf_model
-    original = opf_model.MLPBlock.forward
-    if enabled:
-        opf_model.MLPBlock.forward = _grouped_moe_forward
-    try:
-        yield
-    finally:
-        opf_model.MLPBlock.forward = original
 
 
 def _read_done(pred_path: Path) -> dict[int, dict]:
@@ -90,12 +48,13 @@ def run_opf_baseline(cfg, resolve_path) -> dict:
     space = data["space"]
     docs = subset(data["test"], cfg.eval.max_docs, int(cfg.seed))
     device = bcfg.device if bcfg.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
-    grouped = bool(bcfg.cpu_grouped_moe) and device == "cpu"
+    if device == "cpu":
+        log.warning("OPF on CPU takes ~16 s per document; use a GPU for the full test set")
 
     out_dir = Path(resolve_path(cfg.paths.output_dir)) / bcfg.output_name
     out_dir.mkdir(parents=True, exist_ok=True)
     run_info = {"docs": len(docs), "eval_max_docs": cfg.eval.max_docs, "seed": int(cfg.seed),
-                "data_root": str(data["root"].name), "device": device, "cpu_grouped_moe": grouped,
+                "data_root": str(data["root"].name), "device": device,
                 "checkpoint": bcfg.checkpoint, "context_window_length": bcfg.context_window_length}
     info_path, pred_path = out_dir / "run.json", out_dir / "predictions.jsonl"
     if info_path.exists() and pred_path.exists():
@@ -105,8 +64,8 @@ def run_opf_baseline(cfg, resolve_path) -> dict:
                              "delete it or set baseline.opf.output_name")
     info_path.write_text(json.dumps(run_info, indent=2))
     done = _read_done(pred_path)
-    log.info("OPF baseline on %d test documents (%d already predicted), device=%s, grouped MoE=%s",
-             len(docs), len(done), device, grouped)
+    log.info("OPF baseline on %d test documents (%d already predicted), device=%s", len(docs), len(done),
+             device)
 
     kwargs = {"device": device}
     if bcfg.checkpoint:
@@ -118,7 +77,7 @@ def run_opf_baseline(cfg, resolve_path) -> dict:
     scorer = SpanScorer(space.span_types)
     seconds = [r["seconds"] for r in done.values()]
     t_start = time.time()
-    with _grouped_moe(grouped), pred_path.open("a") as fout:
+    with pred_path.open("a") as fout:
         for i, row in enumerate(docs):
             rec = done.get(i)
             if rec is not None and rec["uid"] != row["uid"]:

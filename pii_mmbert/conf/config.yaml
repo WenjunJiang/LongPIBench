@@ -119,7 +119,6 @@ baseline:                # stage=baseline_opf: OpenAI Privacy Filter on the same
     checkpoint: null     # null = OPF's default checkpoint location (downloaded on first use)
     device: auto         # auto | cpu | cuda
     context_window_length: null   # null = OPF default (128,000 tokens on GPU, 4,096 on CPU)
-    cpu_grouped_moe: true         # CPU only: group tokens per expert (~20x faster; see baseline_opf.py)
     output_name: baseline_opf     # outputs/<name>/: run.json, predictions.jsonl (resumable), metrics.json
 
 predict:
