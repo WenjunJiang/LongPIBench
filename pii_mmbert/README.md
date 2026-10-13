@@ -59,14 +59,57 @@ python -c "import opf; print(opf.__file__)"                         # check
 
 - Dependencies it adds: `tiktoken`, `safetensors`, `huggingface_hub` (torch and numpy are already installed).
 - Checkpoint (~2.8 GB): by default OPF uses `$OPF_CHECKPOINT`, else `~/.opf/privacy_filter`, and downloads
-  automatically only to `~/.opf/privacy_filter`. If the home directory is not writable (shared notebook
-  servers), set `baseline.opf.checkpoint` to a writable directory, e.g.
-  `python main.py stage=baseline_opf baseline.opf.checkpoint=/data/<you>/opf_checkpoint`: when the directory
-  holds no checkpoint, this stage downloads the same files from `openai/privacy-filter` (`original/*`) into it,
-  with the Hugging Face xet chunk cache inside it too (unless `HF_XET_CACHE` is set), and reuses it afterwards.
-  On machines without internet access, copy a checkpoint directory over beforehand.
+  automatically only to `~/.opf/privacy_filter`. If that fails because the home directory is not writable,
+  see the next section. On machines without internet access, copy a checkpoint directory over beforehand.
 - On GPU, OPF's mixture-of-experts layer uses Triton kernels. The CUDA builds of torch on Linux normally
   install `triton`; if OPF reports that `triton` is missing, `pip install triton`.
+
+### When the home directory is not writable (shared GPU / notebook servers)
+
+Symptom: `PermissionError: [Errno 13] Permission denied: '/home/<you>/.opf'` (OPF checkpoint) or a permission
+error under `~/.cache/huggingface` (model, dataset or xet downloads). Point every cache at a writable directory.
+Below, `/data/<you>` stands for any writable location, e.g. a project or shared-storage directory.
+
+1. Caches, once per shell (or once per conda environment, see below):
+
+   ```bash
+   export HF_HOME=/data/<you>/hf_cache                 # Hugging Face: mmBERT, datasets cache, xet chunk cache
+   export TRITON_CACHE_DIR=/data/<you>/triton_cache    # Triton kernels compiled by OPF on GPU (default ~/.triton)
+   ```
+
+   To keep them set in a conda environment (they apply after the next `conda activate`):
+
+   ```bash
+   conda env config vars set HF_HOME=/data/<you>/hf_cache TRITON_CACHE_DIR=/data/<you>/triton_cache
+   conda deactivate && conda activate <env>            # or: conda activate /path/to/.conda_env
+   conda env config vars list                          # check
+   ```
+
+2. OPF checkpoint: set a writable directory in `conf/config.yaml`
+
+   ```yaml
+   baseline:
+     opf:
+       checkpoint: /data/<you>/opf_checkpoint
+   ```
+
+   or per run: `python main.py stage=baseline_opf baseline.opf.checkpoint=/data/<you>/opf_checkpoint`.
+   If the directory holds no checkpoint yet, `stage=baseline_opf` downloads the files OPF itself would download
+   (`openai/privacy-filter`, `original/*`) into it, with the xet chunk cache inside it unless `HF_XET_CACHE`
+   is set, and reuses them on later runs. A directory that already holds a checkpoint (its own `config.json`
+   and `*.safetensors`, e.g. a copy of `~/.opf/privacy_filter`) is used as is. Setting `OPF_CHECKPOINT`
+   instead does not download anything; OPF only reads from it.
+
+3. Check:
+
+   ```bash
+   python main.py stage=baseline_opf eval.max_docs=3   # downloads on first use, then scores 3 documents
+   ls /data/<you>/opf_checkpoint/original              # config.json dtypes.json model.safetensors viterbi_calibration.json
+   ```
+
+Verified here as a non-root user with a read-only `HOME` and no `HF_HOME`: step 2 alone downloaded the
+checkpoint (identical bytes to OPF's own download) and OPF loaded it. The Triton cache setting matters on GPU
+only and was not exercised on this CPU-only machine.
 
 The package is not pip-installed. Run every command from this directory: `python main.py` imports
 `pii_mmbert` from here, `pytest.ini` does the same for the tests, and `stage=tune` passes this directory to
