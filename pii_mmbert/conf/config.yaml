@@ -69,13 +69,11 @@ tune:
   mode: max
   num_samples: 16
   max_concurrent_trials: 2
-  resources_per_trial:   # any other key is passed to Ray as a custom resource
+  resources_per_trial:
     cpu: 4
     gpu: 0.25            # fractional GPU: trials share a card, and its memory is not partitioned
-  # Run trials only on nodes with this GPU type (null = any node). Exact Ray name or a substring that
-  # matches one type in the cluster, e.g. RTX -> GeForce-RTX-4090. Each trial requests 0.01 of
-  # accelerator_type:<name>, because Ray gives a node 1.0 of it in total (requesting 1 = one trial per node).
-  accelerator_type: RTX
+    custom:              # extra Ray resources per trial, passed as-is (null = none)
+      "accelerator_type:RTX": 1
   scheduler:             # ASHA; one time unit = one epoch
     type: asha
     grace_period: 1
