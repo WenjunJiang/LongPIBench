@@ -47,6 +47,23 @@ done
 pytest -q
 ```
 
+### Optional: OpenAI Privacy Filter (only for `stage=baseline_opf`)
+
+OPF is not on PyPI; install it from GitHub into the same environment:
+
+```bash
+pip install git+https://github.com/openai/privacy-filter            # latest
+pip install git+https://github.com/openai/privacy-filter@f7f00ca7fb869683eb732c010299d901457f19c3  # tested
+python -c "import opf; print(opf.__file__)"                         # check
+```
+
+- Dependencies it adds: `tiktoken`, `safetensors`, `huggingface_hub` (torch and numpy are already installed).
+- Checkpoint (~2.8 GB): OPF reads it from `$OPF_CHECKPOINT`, else `~/.opf/privacy_filter`, and downloads it
+  there on first use. To use a copy elsewhere, set `OPF_CHECKPOINT` or `baseline.opf.checkpoint=/path/to/dir`.
+  On machines without internet access, copy that directory over beforehand.
+- On GPU, OPF's mixture-of-experts layer uses Triton kernels. The CUDA builds of torch on Linux normally
+  install `triton`; if OPF reports that `triton` is missing, `pip install triton`.
+
 The package is not pip-installed. Run every command from this directory: `python main.py` imports
 `pii_mmbert` from here, `pytest.ini` does the same for the tests, and `stage=tune` passes this directory to
 the Ray Tune workers through `PYTHONPATH`.
