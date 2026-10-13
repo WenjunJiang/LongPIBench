@@ -194,6 +194,18 @@ def _encode_batch(batch, mapper: LabelMapper, tokenizer, space: LabelSpace):
     return out
 
 
+def subset(docs: Dataset, max_docs, seed: int) -> Dataset:
+    """A seeded random sample of max_docs rows (in dataset order), or all rows when max_docs is None.
+
+    Nemotron's test file lists all "us" rows before all "intl" rows, so the first N rows would be biased.
+    The same (max_docs, seed) always selects the same rows, so every model is scored on the same documents.
+    """
+    if max_docs is None or int(max_docs) >= len(docs):
+        return docs
+    idx = np.random.default_rng(seed).choice(len(docs), int(max_docs), replace=False)
+    return docs.select(sorted(idx.tolist()))
+
+
 def gold_spans(row) -> list[tuple[str, int, int]]:
     return list(zip(row["span_type"], row["span_start"], row["span_end"]))
 

@@ -5,6 +5,7 @@
     python main.py stage=final final.best_params_path=outputs/tune/best_params.json train.epochs=5
     python main.py stage=calibrate                           # Platt + thresholds on the calib split
     python main.py stage=predict predict.text="Call Kim Min-jun at 010-1234-5678"
+    python main.py stage=baseline_opf eval.max_docs=5000      # OpenAI Privacy Filter on the same test docs
     python main.py +experiment=smoke stage=tune          # small CPU run
 """
 
@@ -15,7 +16,7 @@ from hydra.core.hydra_config import HydraConfig
 from hydra.utils import to_absolute_path
 from omegaconf import DictConfig
 
-from pii_mmbert import stages
+from pii_mmbert import baseline_opf, stages
 
 log = logging.getLogger(__name__)
 
@@ -33,8 +34,11 @@ def main(cfg: DictConfig) -> None:
         stages.run_calibrate(cfg, to_absolute_path)
     elif stage == "predict":
         stages.run_predict(cfg, to_absolute_path)
+    elif stage == "baseline_opf":
+        baseline_opf.run_opf_baseline(cfg, to_absolute_path)
     else:
-        raise ValueError(f"unknown stage {stage!r}; expected preprocess | tune | final | calibrate | predict")
+        raise ValueError(f"unknown stage {stage!r}; expected preprocess | tune | final | calibrate | predict"
+                         " | baseline_opf")
 
 
 if __name__ == "__main__":

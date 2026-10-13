@@ -4,7 +4,7 @@ defaults:
   - label_map: nemotron_to_opf_v2
   - _self_
 
-stage: preprocess        # preprocess | tune | final | calibrate | predict
+stage: preprocess        # preprocess | tune | final | calibrate | predict | baseline_opf
 seed: 13
 
 paths:                   # relative paths are resolved against the directory main.py is launched from
@@ -60,7 +60,8 @@ decode:                  # constrained BIES Viterbi, same bias keys as OPF viter
     transition_bias_end_to_start: 0.0
 
 eval:
-  max_docs: null         # cap on documents scored per evaluation (null = all)
+  max_docs: null         # cap on documents scored per evaluation (null = all); a seeded random sample,
+                         # identical for every model and baseline evaluated with the same value
 
 tune:
   name: pii_mmbert_tune
@@ -112,6 +113,14 @@ calibration:             # stage=calibrate, all on the calib split: 1) Viterbi b
   zero_positive_policy: global   # type with enough calib spans but none correct: global | reject (drop type)
   eval_on_test: true     # report test metrics: config biases, chosen biases, chosen biases + thresholds
   output_file: calibration.json   # written into model_dir; stage=predict applies it when present
+
+baseline:                # stage=baseline_opf: OpenAI Privacy Filter on the same test docs (eval.max_docs sample)
+  opf:
+    checkpoint: null     # null = OPF's default checkpoint location (downloaded on first use)
+    device: auto         # auto | cpu | cuda
+    context_window_length: null   # null = OPF default (128,000 tokens on GPU, 4,096 on CPU)
+    cpu_grouped_moe: true         # CPU only: group tokens per expert (~20x faster; see baseline_opf.py)
+    output_name: baseline_opf     # outputs/<name>/: run.json, predictions.jsonl (resumable), metrics.json
 
 predict:
   model_dir: ${paths.output_dir}/${final.output_name}

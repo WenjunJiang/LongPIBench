@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 from omegaconf import OmegaConf
 
-from pii_mmbert.data import (DOC_FEATURES, LabelMapper, _encode_batch, _windows_batch, doc_windows,
+from pii_mmbert.data import (DOC_FEATURES, LabelMapper, _encode_batch, _windows_batch, doc_windows, subset,
                              token_bies_labels, window_bounds)
 from pii_mmbert.labels import IGNORE_INDEX, LabelSpace, labels_to_spans
 
@@ -104,3 +104,11 @@ def test_encode_and_window_with_datasets_map(mapper):
                  fn_kwargs={"max_length": 16, "stride": 4, "bos_id": 2, "eos_id": 1})
     assert len(win) > 2 and set(win["doc_index"]) == {0, 1}
     assert set(win.column_names) == {"input_ids", "labels", "doc_index", "token_start"}
+
+
+def test_subset_is_seeded_and_spread():
+    datasets = pytest.importorskip("datasets")
+    ds = datasets.Dataset.from_dict({"i": list(range(100))})
+    a, b = subset(ds, 10, 7)["i"], subset(ds, 10, 7)["i"]
+    assert a == b and a == sorted(a) and len(set(a)) == 10 and max(a) >= 50
+    assert len(subset(ds, None, 7)) == 100 and len(subset(ds, 1000, 7)) == 100

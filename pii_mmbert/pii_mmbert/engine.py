@@ -17,7 +17,7 @@ from transformers import AutoTokenizer, get_linear_schedule_with_warmup
 
 from torch.utils.data import DataLoader
 
-from .data import doc_windows, gold_spans
+from .data import doc_windows, gold_spans, subset
 from .labels import IGNORE_INDEX, LabelSpace, labels_to_spans
 from .metrics import SpanScorer
 from .model import PiiTagger, class_weights, token_loss
@@ -138,9 +138,7 @@ def iter_predictions(model, docs, space: LabelSpace, cfg, device, bos_id, eos_id
     """Yield (row, DocPrediction) for a document Dataset (memory-mapped; rows read one at a time)."""
     model.eval()
     decoder = ViterbiDecoder(space, dict(cfg.decode.biases))
-    if max_docs is not None:
-        docs = docs.select(range(min(int(max_docs), len(docs))))
-    for row in docs:
+    for row in subset(docs, max_docs, int(cfg.seed)):
         yield row, predict_document(model, row["text"], row["input_ids"], row["offset_start"],
                                     row["offset_end"], space, decoder, cfg, device, bos_id, eos_id, pad_id)
 

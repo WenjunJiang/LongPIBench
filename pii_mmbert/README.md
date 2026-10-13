@@ -17,13 +17,14 @@ Token-level PII detector trained on NVIDIA Nemotron-PII:
 conf/config.yaml                         all defaults: data, model, train, loss, decode, tune, final, predict
 conf/label_map/nemotron_to_opf_v2.yaml   Nemotron -> OPF label mapping and merge rules
 conf/experiment/smoke.yaml               tiny CPU run used to check the pipeline
-main.py                                  Hydra entry point (stage=preprocess|tune|final|calibrate|predict)
+main.py                                  Hydra entry point (stage=preprocess|tune|final|calibrate|predict|baseline_opf)
 pii_mmbert/labels.py                     BIES label space, labels -> spans
 pii_mmbert/viterbi.py                    constrained Viterbi (OPF semantics), single and batched
 pii_mmbert/data.py                       label mapping, tokenization, windows; Hugging Face datasets cache
 pii_mmbert/model.py                      encoder + tag head, token cross-entropy
 pii_mmbert/engine.py                     training loop, document log-probs, span extraction, evaluation
-pii_mmbert/metrics.py                    span and token metrics
+pii_mmbert/metrics.py                    span (exact and overlap) and token metrics
+pii_mmbert/baseline_opf.py               OpenAI Privacy Filter baseline on the same test documents
 pii_mmbert/decode_search.py              Viterbi bias search on cached calib log-probs
 pii_mmbert/calibration.py                Platt scaling, F-beta thresholds, ECE
 pii_mmbert/stages.py                     preprocess / Ray Tune / final / calibrate / predict
@@ -75,6 +76,10 @@ python main.py stage=calibrate calibration.bias_search.enabled=false     # keep 
 # 5. Predict (applies calibration.json when present: its biases, calibrated scores, thresholded spans)
 python main.py stage=predict predict.text="Call Kim Min-jun at 010-1234-5678"
 
+# 6. Baseline: OpenAI Privacy Filter on the same test documents and metrics (needs the opf package)
+python main.py stage=baseline_opf                       # whole test set (use a GPU)
+python main.py stage=baseline_opf eval.max_docs=5000    # seeded sample; same docs as any eval with 5000
+
 # Any stage with the tiny CPU settings
 python main.py +experiment=smoke stage=tune
 ```
@@ -82,6 +87,7 @@ python main.py +experiment=smoke stage=tune
 Outputs:
 
 - `outputs/tune/best_params.json`, `summary.json`, `trials.csv`, `ray_results/`
+- `outputs/baseline_opf/`: `run.json`, `predictions.jsonl` (appended per document; a rerun resumes), `metrics.json`
 - `outputs/final_model/`: `encoder/` (Hugging Face format + tokenizer), `heads.pt`, `pii_tagger.json`
   (labels, decode biases, window settings), `resolved_config.yaml`, `metrics.json`, and after
   `stage=calibrate` `calibration.json` (decode biases, Platt parameters, thresholds, search and test report)
@@ -149,8 +155,24 @@ Outputs:
   token only attends to 128 tokens on either side. mmBERT has a global-attention layer every third layer, so the
   window length changes what each token sees. With mmBERT's tokenizer, 98.9% of Nemotron training documents fit
   in one 1024-token window (p50 205, p99 1034 tokens).
-- **Metrics**: exact typed span P/R/F1 on character offsets (primary, `span_f1`), token-level PII-vs-O detection,
-  per-type span F1, and the share of PII-free documents with any prediction.
+- **Metrics**: exact typed span P/R/F1 on character offsets (primary, `span_f1`); overlap-matched typed span
+  P/R/F1 (`span_overlap_*`: same type, at least one shared character), which separates boundary conventions
+  from missed or invented spans; token-level PII-vs-O detection; per-type span P/R/F1 with gold and
+  predicted counts; and the share of PII-free documents with any prediction.
+- **Evaluation subsets**: `eval.max_docs` takes a seeded random sample (`data.subset`), not the first rows:
+  Nemotron's test file lists all 50,000 `us` rows before the `intl` rows. Any two evaluations with the same
+  `eval.max_docs` and `seed` score the same documents.
+- **OPF baseline** (`stage=baseline_opf`): OPF predicts the same eight types, so its character spans are
+  scored against the same mapped gold spans with the same scorer; for token metrics they are projected onto
+  mmBERT tokens with the rule used for the gold labels. OPF runs with its own defaults (Viterbi with its
+  shipped operating point, whitespace trimming). Differences in labelling conventions count against it:
+  for example Nemotron's generic `date` and lone city/country mentions are background in our mapping, while
+  OPF may tag them. Per-type and overlap metrics show where the disagreement is.
+  - On CPU, OPF's mixture-of-experts layer gathers each token's expert weights per token. With
+    `baseline.opf.cpu_grouped_moe=true` (default) each expert is applied once to all its tokens, as OPF's
+    GPU kernel does: 0.74 s instead of 16.2 s per test document on 4 vCPUs. The bf16 residual stream makes
+    the result differ slightly from OPF's CPU path (mean |Δp| ~1e-5, no argmax change on 12 documents; one
+    of the 12 had one span more or less after Viterbi). Set it to false to run OPF's code unchanged.
 
 ## Verified in this repo (CPU, 4 vCPU, no GPU)
 

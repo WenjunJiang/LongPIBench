@@ -11,3 +11,5 @@ datasets>=3.0         # 5.1.0
 pyarrow>=14           # 25.0.1
 numpy                 # 2.4.6
 pytest>=8             # 9.1.1, tests only
+# Optional, only for stage=baseline_opf (OpenAI Privacy Filter baseline):
+#   pip install git+https://github.com/openai/privacy-filter   # tested at commit f7f00ca

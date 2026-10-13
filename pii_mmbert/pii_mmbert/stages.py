@@ -10,7 +10,7 @@ from pathlib import Path
 from omegaconf import DictConfig, OmegaConf
 
 from .calibration import Calibrator, expected_calibration_error, fit_calibrator
-from .data import gold_spans, load_or_build, load_windows, windows_dir
+from .data import gold_spans, load_or_build, load_windows, subset, windows_dir
 from .decode_search import decode_cache, search_biases
 from .engine import (doc_log_probs, evaluate, pick_device, predict_document, score_prediction, special_ids,
                      spans_from_path, train)
@@ -169,8 +169,7 @@ def run_final(cfg: DictConfig, cli_overrides: list[str], resolve_path) -> dict:
 
 def _log_prob_cache(model, docs, space, cfg, device, bos, eos, pad, max_docs) -> list[dict]:
     """Run the model once per document and keep what decoding and scoring need."""
-    if max_docs is not None:
-        docs = docs.select(range(min(int(max_docs), len(docs))))
+    docs = subset(docs, max_docs, int(cfg.seed))
     return [{"text": row["text"], "offset_start": row["offset_start"], "offset_end": row["offset_end"],
              "log_probs": doc_log_probs(model, row["input_ids"], space, cfg, device, bos, eos, pad),
              "gold": set(gold_spans(row))}
@@ -219,9 +218,7 @@ def run_calibrate(cfg, resolve_path) -> dict:
 
     # 3. Test: config biases (before) -> chosen biases -> chosen biases + Platt/thresholds (after).
     if cfg.calibration.eval_on_test:
-        test = data["test"]
-        if cfg.eval.max_docs is not None:
-            test = test.select(range(min(int(cfg.eval.max_docs), len(test))))
+        test = subset(data["test"], cfg.eval.max_docs, int(cfg.seed))
         base_dec, chosen_dec = ViterbiDecoder(space, base_biases), ViterbiDecoder(space, biases)
         before, with_biases, after = (SpanScorer(space.span_types) for _ in range(3))
         t_records = []
