@@ -7,12 +7,11 @@ holding the corpus in Python objects.
 Document dataset columns (one row per Nemotron row):
     uid, text,
     span_type / span_start / span_end      gold spans in the target taxonomy (char offsets)
-    sens_start / sens_end                  char ranges of sensitive source labels
     input_ids, offset_start, offset_end    tokenizer output without special tokens
     token_labels                           BIES label id per token
 
 Window dataset columns (one row per training window):
-    input_ids (with <bos>/<eos>), labels (IGNORE_INDEX on specials), sensitive, doc_index, token_start
+    input_ids (with <bos>/<eos>), labels (IGNORE_INDEX on specials), doc_index, token_start
 """
 
 from __future__ import annotations
@@ -41,8 +40,6 @@ DOC_FEATURES = Features({
     "span_type": Sequence(Value("string")),
     "span_start": Sequence(Value("int32")),
     "span_end": Sequence(Value("int32")),
-    "sens_start": Sequence(Value("int32")),
-    "sens_end": Sequence(Value("int32")),
     "input_ids": Sequence(Value("int32")),
     "offset_start": Sequence(Value("int32")),
     "offset_end": Sequence(Value("int32")),
@@ -52,7 +49,6 @@ DOC_FEATURES = Features({
 WINDOW_FEATURES = Features({
     "input_ids": Sequence(Value("int32")),
     "labels": Sequence(Value("int16")),
-    "sensitive": Value("float32"),
     "doc_index": Value("int32"),
     "token_start": Value("int32"),
 })
@@ -79,16 +75,14 @@ class LabelMapper:
         self.merge_enabled = bool(merge.enabled)
         self.max_gap = int(merge.max_gap_chars)
         self.gap_re = re.compile(merge.gap_pattern)
-        self.sensitive = set(label_map_cfg.sensitive_source_labels or [])
 
     def known(self, label: str) -> bool:
         return label in self.mapping or label in self.attach
 
-    def __call__(self, text: str, source_spans: list[dict]):
+    def __call__(self, text: str, source_spans: list[dict]) -> list[tuple[str, int, int]]:
         unknown = sorted({s["label"] for s in source_spans if not self.known(s["label"])})
         if unknown:
             raise ValueError(f"source labels missing from label_map: {unknown}")
-        sensitive = [(s["start"], s["end"]) for s in source_spans if s["label"] in self.sensitive]
 
         cand = []  # (type, start, end, is_core)
         for s in source_spans:
@@ -116,8 +110,7 @@ class LabelMapper:
                     g[2], g[3] = en, g[3] or core
                     continue
             groups.append([typ, st, en, core])
-        spans = [(t, s, e) for t, s, e, core in groups if core]
-        return spans, sensitive
+        return [(t, s, e) for t, s, e, core in groups if core]
 
 
 # ----------------------------------------------------------------------------- tokens and windows
@@ -155,31 +148,25 @@ def window_bounds(n_tokens: int, max_length: int, stride: int) -> list[tuple[int
     return [(s, min(s + body, n_tokens)) for s in starts]
 
 
-def doc_windows(input_ids, offset_start, offset_end, token_labels, sens_start, sens_end,
-                max_length: int, stride: int, bos_id: int, eos_id: int, with_labels: bool = True):
-    """Yield (token_start, input_ids, labels or None, sensitive) for one document."""
+def doc_windows(input_ids, token_labels, max_length: int, stride: int, bos_id: int, eos_id: int,
+                with_labels: bool = True):
+    """Yield (token_start, input_ids, labels or None) for one document."""
     ids = np.asarray(input_ids, dtype=np.int32)
     labs = np.asarray(token_labels, dtype=np.int16) if with_labels else None
     for st, en in window_bounds(len(ids), max_length, stride):
         win_ids = np.concatenate([[bos_id], ids[st:en], [eos_id]]).astype(np.int32)
         win_labs = (np.concatenate([[IGNORE_INDEX], labs[st:en], [IGNORE_INDEX]]).astype(np.int16)
                     if with_labels else None)
-        c0 = int(offset_start[st]) if en > st else 0
-        c1 = int(offset_end[en - 1]) if en > st else 0
-        sens = float(any(a < c1 and b > c0 for a, b in zip(sens_start, sens_end)))
-        yield st, win_ids, win_labs, sens
+        yield st, win_ids, win_labs
 
 
 def _windows_batch(batch, indices, max_length, stride, bos_id, eos_id):
     out = {k: [] for k in WINDOW_FEATURES}
     for j, idx in enumerate(indices):
-        for st, ids, labs, sens in doc_windows(
-                batch["input_ids"][j], batch["offset_start"][j], batch["offset_end"][j],
-                batch["token_labels"][j], batch["sens_start"][j], batch["sens_end"][j],
-                max_length, stride, bos_id, eos_id):
+        for st, ids, labs in doc_windows(batch["input_ids"][j], batch["token_labels"][j],
+                                         max_length, stride, bos_id, eos_id):
             out["input_ids"].append(ids)
             out["labels"].append(labs)
-            out["sensitive"].append(sens)
             out["doc_index"].append(idx)
             out["token_start"].append(st)
     return out
@@ -193,15 +180,13 @@ def _encode_batch(batch, mapper: LabelMapper, tokenizer, space: LabelSpace):
         source = ast.literal_eval(raw) if isinstance(raw, str) else list(raw)
         # Offsets are authoritative; the span "text" field sometimes differs in case only.
         source = [{"label": s["label"], "start": int(s["start"]), "end": int(s["end"])} for s in source]
-        spans, sensitive = mapper(text, source)
+        spans = mapper(text, source)
         offsets = np.asarray(enc["offset_mapping"][j], dtype=np.int32).reshape(-1, 2)
         out["uid"].append(batch["uid"][j])
         out["text"].append(text)
         out["span_type"].append([t for t, _, _ in spans])
         out["span_start"].append([s for _, s, _ in spans])
         out["span_end"].append([e for _, _, e in spans])
-        out["sens_start"].append([s for s, _ in sensitive])
-        out["sens_end"].append([e for _, e in sensitive])
         out["input_ids"].append(np.asarray(enc["input_ids"][j], dtype=np.int32))
         out["offset_start"].append(offsets[:, 0])
         out["offset_end"].append(offsets[:, 1])
@@ -222,7 +207,7 @@ def _cache_key(cfg) -> str:
         "label_map": OmegaConf.to_container(cfg.label_map, resolve=True),
         "model": cfg.model.name,
         "seed": cfg.seed,
-        "version": 3,
+        "version": 4,
     }
     for k in ("max_length", "stride", "num_proc"):   # do not change the document datasets
         payload["data"].pop(k, None)
@@ -252,9 +237,9 @@ def cache_root(cfg, resolve_path) -> Path:
 
 
 def load_or_build(cfg, resolve_path) -> dict:
-    """Build (once) and memory-map the train / val / test document datasets.
+    """Build (once) and memory-map the train / val / calib / test document datasets.
 
-    Returns {"train": Dataset, "val": Dataset, "test": Dataset, "space": LabelSpace,
+    Returns {"train", "val", "calib", "test": Dataset, "space": LabelSpace,
              "stats": dict, "root": Path}.
     """
     root = cache_root(cfg, resolve_path)
@@ -318,9 +303,9 @@ def _build(cfg, resolve_path, root: Path, space: LabelSpace) -> None:
 
 def _split_stats(ds: Dataset, space: LabelSpace) -> dict:
     by_type = {t: 0 for t in space.span_types}
-    n_tok = n_pii = n_sens = 0
+    n_tok = n_pii = 0
     uids = set()
-    for batch in ds.select_columns(["uid", "span_type", "token_labels", "sens_start"]).iter(batch_size=2000):
+    for batch in ds.select_columns(["uid", "span_type", "token_labels"]).iter(batch_size=2000):
         uids.update(batch["uid"])
         for types in batch["span_type"]:
             for t in types:
@@ -329,10 +314,9 @@ def _split_stats(ds: Dataset, space: LabelSpace) -> dict:
             arr = np.asarray(labs)
             n_tok += arr.size
             n_pii += int(np.count_nonzero(arr))
-        n_sens += sum(1 for s in batch["sens_start"] if len(s))
     return {"docs": len(ds), "uids": len(uids), "tokens": n_tok,
             "pii_token_fraction": n_pii / n_tok if n_tok else 0.0,
-            "docs_with_sensitive": n_sens, "spans_by_type": by_type}
+            "spans_by_type": by_type}
 
 
 def windows_dir(cfg, data: dict, split: str) -> Path:

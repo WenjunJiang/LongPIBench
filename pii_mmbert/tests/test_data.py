@@ -22,7 +22,7 @@ def _span(text, sub, label, start=0):
 
 def test_first_and_last_name_merge(mapper):
     t = "I, Ethan Connelly, apply."
-    spans, _ = mapper(t, [_span(t, "Ethan", "first_name"), _span(t, "Connelly", "last_name")])
+    spans = mapper(t, [_span(t, "Ethan", "first_name"), _span(t, "Connelly", "last_name")])
     assert spans == [("private_person", 3, 17)]
 
 
@@ -30,24 +30,22 @@ def test_address_components_attach_only_next_to_street(mapper):
     t = "Lives at 87 Main St, Springfield, IL 62704. Born in Canada."
     src = [_span(t, "87 Main St", "street_address"), _span(t, "Springfield", "city"),
            _span(t, "IL", "state"), _span(t, "62704", "postcode"), _span(t, "Canada", "country")]
-    spans, _ = mapper(t, src)
+    spans = mapper(t, src)
     assert spans == [("private_address", t.index("87"), t.index("62704") + 5)]
 
 
-def test_background_labels_and_sensitive(mapper):
+def test_background_labels(mapper):
     t = "Dana, a nurse, is Buddhist."
-    spans, sens = mapper(t, [_span(t, "Dana", "first_name"), _span(t, "nurse", "occupation"),
-                             _span(t, "Buddhist", "religious_belief")])
+    spans = mapper(t, [_span(t, "Dana", "first_name"), _span(t, "nurse", "occupation"),
+                       _span(t, "Buddhist", "religious_belief")])
     assert spans == [("private_person", 0, 4)]
-    assert sens == [(t.index("Buddhist"), t.index("Buddhist") + 8)]
 
 
-def test_sensitive_labels_are_attributes_not_identifiers(mapper):
+def test_identifiers_and_attributes(mapper):
     t = "Kim, 34, female, MRN 99812."
-    spans, sens = mapper(t, [_span(t, "Kim", "first_name"), _span(t, "34", "age"),
-                             _span(t, "female", "gender"), _span(t, "99812", "medical_record_number")])
+    spans = mapper(t, [_span(t, "Kim", "first_name"), _span(t, "34", "age"),
+                       _span(t, "female", "gender"), _span(t, "99812", "medical_record_number")])
     assert spans == [("private_person", 0, 3), ("account_number", t.index("99812"), t.index("99812") + 5)]
-    assert sens == [(t.index("34"), t.index("34") + 2), (t.index("female"), t.index("female") + 6)]
 
 
 def test_unknown_label_fails(mapper):
@@ -67,10 +65,9 @@ def test_bies_round_trip():
 
 def test_windows_cover_every_token_with_overlap():
     n = 50
-    ids, starts, ends, labs = list(range(10, 10 + n)), list(range(n)), list(range(1, n + 1)), [0] * n
+    ids, labs = list(range(10, 10 + n)), [0] * n
     covered = set()
-    for st, w_ids, w_labs, _ in doc_windows(ids, starts, ends, labs, [], [], max_length=22, stride=5,
-                                            bos_id=2, eos_id=1):
+    for st, w_ids, w_labs in doc_windows(ids, labs, max_length=22, stride=5, bos_id=2, eos_id=1):
         assert w_ids[0] == 2 and w_ids[-1] == 1 and w_ids.dtype.kind == "i"
         assert w_labs[0] == IGNORE_INDEX and w_labs[-1] == IGNORE_INDEX
         covered |= set(range(st, st + len(w_ids) - 2))
@@ -106,4 +103,4 @@ def test_encode_and_window_with_datasets_map(mapper):
     win = ds.map(_windows_batch, batched=True, with_indices=True, remove_columns=ds.column_names,
                  fn_kwargs={"max_length": 16, "stride": 4, "bos_id": 2, "eos_id": 1})
     assert len(win) > 2 and set(win["doc_index"]) == {0, 1}
-    assert max(win["sensitive"]) == 1.0 and win["sensitive"][-1] == 0.0
+    assert set(win.column_names) == {"input_ids", "labels", "doc_index", "token_start"}

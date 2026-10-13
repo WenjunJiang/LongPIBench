@@ -6,7 +6,8 @@ Token-level PII detector trained on NVIDIA Nemotron-PII:
 |---|---|
 | Labels: `O` + B/I/E/S × 8 types = 33 | OpenAI Privacy Filter v2 taxonomy |
 | Decoding: constrained BIES Viterbi with 6 transition biases | OpenAI Privacy Filter (`opf/_core/decoding.py`); `tests/test_viterbi.py` checks identical paths against OPF |
-| Loss: `1.5 × class-weighted CE(BIES) + 0.3 × BCE(sensitivity)` | PII-TRACE (arXiv 2609.22200, eq. 3) |
+| Loss: token cross-entropy over the 33 labels, averaged over non-special tokens | OPF's fine-tuning code (`opf/_train/runner.py`, `_masked_token_loss_and_accuracy`) |
+| Operating point: Viterbi biases, then per-type Platt scaling and F-beta thresholds, all chosen on a held-out calib split | `stage=calibrate` |
 | Encoder | `jhu-clsp/mmBERT-small` (140M params, hidden 384, 8192 context) |
 | Data | `nvidia/Nemotron-PII` (CC-BY-4.0), 55 source labels mapped to the 8 OPF types |
 
@@ -14,18 +15,19 @@ Token-level PII detector trained on NVIDIA Nemotron-PII:
 
 ```
 conf/config.yaml                         all defaults: data, model, train, loss, decode, tune, final, predict
-conf/label_map/nemotron_to_opf_v2.yaml   Nemotron -> OPF label mapping, merge rules, sensitive labels
+conf/label_map/nemotron_to_opf_v2.yaml   Nemotron -> OPF label mapping and merge rules
 conf/experiment/smoke.yaml               tiny CPU run used to check the pipeline
 main.py                                  Hydra entry point (stage=preprocess|tune|final|calibrate|predict)
 pii_mmbert/labels.py                     BIES label space, labels -> spans
-pii_mmbert/viterbi.py                    constrained Viterbi (OPF semantics)
+pii_mmbert/viterbi.py                    constrained Viterbi (OPF semantics), single and batched
 pii_mmbert/data.py                       label mapping, tokenization, windows; Hugging Face datasets cache
-pii_mmbert/model.py                      encoder + tag head + sensitivity head, PII-TRACE loss
-pii_mmbert/engine.py                     training loop, document-level evaluation
+pii_mmbert/model.py                      encoder + tag head, token cross-entropy
+pii_mmbert/engine.py                     training loop, document log-probs, span extraction, evaluation
 pii_mmbert/metrics.py                    span and token metrics
+pii_mmbert/decode_search.py              Viterbi bias search on cached calib log-probs
 pii_mmbert/calibration.py                Platt scaling, F-beta thresholds, ECE
 pii_mmbert/stages.py                     preprocess / Ray Tune / final / calibrate / predict
-tests/                                   mapping, BIES, windows, Viterbi-vs-OPF tests
+tests/                                   mapping, BIES, windows, Viterbi (vs OPF, batched), bias search, calibration
 requirements.txt                         dependencies (pip install -r requirements.txt)
 pytest.ini                               puts this directory on sys.path for the tests
 ```
@@ -65,11 +67,12 @@ python main.py stage=tune tune.num_samples=32 tune.resources_per_trial.gpu=1 tra
 python main.py stage=final final.best_params_path=outputs/tune/best_params.json
 python main.py stage=final final.best_params_path=outputs/tune/best_params.json train.epochs=5 train.lr=3e-5
 
-# 4. Calibrate: Platt scaling + F-beta thresholds on the held-out calib split, written to calibration.json
+# 4. Calibrate on the held-out calib split: Viterbi biases, then Platt + F-beta thresholds -> calibration.json
 python main.py stage=calibrate
-python main.py stage=calibrate calibration.beta=2.0          # favour recall when choosing thresholds
+python main.py stage=calibrate calibration.beta=2.0                      # favour recall
+python main.py stage=calibrate calibration.bias_search.enabled=false     # keep decode.biases
 
-# 5. Predict (applies calibration.json when present: calibrated scores, thresholded spans, sensitivity)
+# 5. Predict (applies calibration.json when present: its biases, calibrated scores, thresholded spans)
 python main.py stage=predict predict.text="Call Kim Min-jun at 010-1234-5678"
 
 # Any stage with the tiny CPU settings
@@ -81,7 +84,7 @@ Outputs:
 - `outputs/tune/best_params.json`, `summary.json`, `trials.csv`, `ray_results/`
 - `outputs/final_model/`: `encoder/` (Hugging Face format + tokenizer), `heads.pt`, `pii_tagger.json`
   (labels, decode biases, window settings), `resolved_config.yaml`, `metrics.json`, and after
-  `stage=calibrate` `calibration.json` (Platt parameters, thresholds, calibration and test report)
+  `stage=calibrate` `calibration.json` (decode biases, Platt parameters, thresholds, search and test report)
 
 ## Design notes
 
@@ -97,22 +100,42 @@ Outputs:
   seeded hash of the uid into train / val (`data.val_fraction`, used by Ray Tune) / calib
   (`data.calib_fraction`), so the two variants never land on different sides. The calib split is never
   trained on, including in `stage=final` with `include_val_in_train=true`. Nemotron's test file is the test set.
-- **Calibration** (`stage=calibrate`, `pii_mmbert/calibration.py`):
-  - Raw span score = mean probability of the decoded labels over the span's tokens. Target = the span
-    exactly matches a gold span (type and character offsets).
-  - Platt scaling `p = sigmoid(a * logit(score) + b)`, fitted with Platt's smoothed targets, per span type
-    when the type has at least `calibration.min_spans_per_type` calib spans, otherwise the global fit.
-  - Threshold per type maximises F-beta on the calib split. Recall's denominator is all gold spans of that
-    type, including ones the decoder never proposed, so a threshold can only trade precision for recall.
+- **Loss**: plain token cross-entropy, as in OPF's fine-tuning code. There is no class weighting by default
+  (`loss.background_weight: 1.0`). Training with an "O" weight w approximately learns probabilities with
+  O's mass scaled by w; after per-token normalisation (which does not change the Viterbi path) that is the
+  same as adding log(w) to every transition into O. That is a decode setting, so it is chosen after training
+  in `stage=calibrate` instead of being fixed into the weights. The equivalence is exact only for a model
+  that fits the weighted target perfectly; `background_weight` stays available for an ablation.
+- **Calibration** (`stage=calibrate`), all on the calib split, which no training stage uses:
+  1. *Viterbi biases* (`pii_mmbert/decode_search.py`). The model runs once over the calib documents and
+     their log-probs are kept in memory; each candidate only re-runs (batched) Viterbi. A candidate is scored
+     by the best F-beta it reaches with one global threshold on raw span scores, because thresholds are
+     applied afterwards: judging at threshold 0 would favour conservative biases and give up recall a
+     threshold could keep. Random search over `calibration.bias_search.search_space`; trial 0 is always
+     `decode.biases`, so the result never scores below it on calib. `background_stay` is not searched:
+     every legal transition gets exactly one bias, so adding one constant to all six changes no path.
+  2. *Platt and thresholds* (`pii_mmbert/calibration.py`), fitted on the spans decoded with the chosen biases.
+     Raw span score = mean probability of the decoded labels over the span's tokens; target = the span
+     exactly matches a gold span (type and character offsets). Platt scaling `p = sigmoid(a * logit(score) + b)`
+     with Platt's smoothed targets, per span type when the type has at least `calibration.min_spans_per_type`
+     calib spans, otherwise the global fit.
+  - Threshold per type maximises F-beta. Recall's denominator is all gold spans of that type, including ones
+    the decoder never proposed, so a threshold can only trade precision for recall; biases are the step that
+    can raise recall.
   - A type gets its own threshold only with at least `min_spans_per_type` calib spans and at least one
     correct one. With too few spans it uses the global threshold. With enough spans but none correct,
     `calibration.zero_positive_policy` decides: `global` (default; keeps recall for PII) or `reject`
     (drop the type). The rule used per type is recorded as `threshold_rule` in `calibration.json`.
-  - The sensitivity head is calibrated the same way at document level (max window logit vs. whether the
-    document contains a sensitive source label).
-  - The report lists ECE before and after Platt on calib and test, and test P/R/F1 before and after thresholds.
+  - Biases, Platt parameters and thresholds are chosen on the same split. They are a few dozen parameters
+    on ~5,000 documents, and the test set is not touched, so reported test numbers stay unbiased.
+  - `calibration.json` stores the chosen biases; `stage=predict` decodes with them (falling back to the
+    model's `pii_tagger.json` biases without a calibration file), so prediction uses the decoder the
+    thresholds were fitted for.
+  - The report has the search (baseline, best, top 5), ECE before and after Platt on calib and test, and test
+    metrics three ways: `test_before` (config biases, no thresholds), `test_biases_only`, and `test_after`.
 - **Storage**: preprocessed documents and training windows are Hugging Face `datasets` written with
-  `save_to_disk` under `cache/nemotron_<hash>/` (`train`, `val`, `test`, `windows_<split>_L<len>_S<stride>`).
+  `save_to_disk` under `cache/nemotron_<hash>/` (`train`, `val`, `calib`, `test`,
+  `windows_<split>_L<len>_S<stride>`).
   They are memory-mapped with `load_from_disk`, so training and evaluation read rows on demand, and Ray Tune
   trials receive dataset directories rather than copies of the data. `stats.json` is written last and marks
   the cache as complete; every directory is written to a `.tmp` path and renamed when done.
@@ -123,12 +146,6 @@ Outputs:
   token only attends to 128 tokens on either side. mmBERT has a global-attention layer every third layer, so the
   window length changes what each token sees. With mmBERT's tokenizer, 98.9% of Nemotron training documents fit
   in one 1024-token window (p50 205, p99 1034 tokens).
-- **Sensitivity head**: target = whether the window contains a span whose source label is in
-  `sensitive_source_labels`. The list follows PII-TRACE's sensitive-attribute layer: race/ethnicity, religion,
-  political view, sexuality, age, gender, and blood type (Nemotron has no health-condition or disability label).
-  These are attributes, not identifiers, so the tag head labels them `O` and only the sensitivity head sees them.
-  Set `loss.lambda_sens=0` to train without it. With this list 20.5% of training documents are sensitive
-  (train 17,448 / 84,950; calib 19.6%; test 25.8%).
 - **Metrics**: exact typed span P/R/F1 on character offsets (primary, `span_f1`), token-level PII-vs-O detection,
   per-type span F1, and the share of PII-free documents with any prediction.
 

@@ -54,3 +54,15 @@ def test_matches_opf_decoder_on_random_inputs():
         theirs = opf_dec.ViterbiCRFDecoder(label_info=info, **biases)
         lp = torch.log_softmax(torch.randn(rng.randint(1, 40), space.num_labels) * 3, dim=-1)
         assert ours.decode(lp) == theirs.decode(lp)
+
+
+def test_batch_decode_matches_single_decode():
+    space = LabelSpace(TYPES)
+    rng = random.Random(3)
+    gen = torch.Generator().manual_seed(3)
+    for trial in range(4):
+        biases = {k: rng.uniform(-3, 3) for k in BIAS_KEYS} if trial else {}
+        dec = ViterbiDecoder(space, biases)
+        docs = [torch.log_softmax(torch.randn(rng.randint(0, 60), space.num_labels, generator=gen) * 3, -1)
+                for _ in range(37)]
+        assert dec.decode_batch(docs, batch_size=8) == [dec.decode(d) for d in docs]

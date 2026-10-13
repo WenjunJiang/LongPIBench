@@ -42,12 +42,14 @@ train:
   num_workers: 0         # DataLoader worker processes
   log_every: 50          # steps between loss log lines
 
-loss:                    # PII-TRACE: L = lambda_tok * weighted CE(BIES) + lambda_sens * BCE(sensitivity)
-  lambda_tok: 1.5
-  lambda_sens: 0.3
-  background_weight: 0.5 # class weight of "O"; all PII labels have weight 1.0
+loss:                    # token cross-entropy over the BIES labels, as in OPF's fine-tuning code
+  background_weight: 1.0 # class weight of "O"; 1.0 = plain CE. A weight w < 1 mostly acts like adding
+                         # log(w) to every transition into O at decode time, which stage=calibrate can
+                         # set without retraining. Keep 1.0 except for ablations.
 
-decode:                  # constrained BIES Viterbi, same bias keys as OPF viterbi_calibration.json
+decode:                  # constrained BIES Viterbi, same bias keys as OPF viterbi_calibration.json.
+                         # Used during training/validation and as the starting point (trial 0) of the
+                         # bias search in stage=calibrate; predict uses the biases in calibration.json.
   trim_whitespace: true
   biases:
     transition_bias_background_stay: 0.0
@@ -82,8 +84,6 @@ tune:
     - {param: train.warmup_ratio, type: choice, values: [0.0, 0.05, 0.1]}
     - {param: train.batch_size, type: choice, values: [8, 16, 32]}
     - {param: model.dropout, type: choice, values: [0.0, 0.1, 0.2]}
-    - {param: loss.background_weight, type: uniform, lower: 0.1, upper: 1.0}
-    - {param: loss.lambda_sens, type: choice, values: [0.0, 0.3, 1.0]}
 
 final:
   best_params_path: null       # best_params.json written by stage=tune; null = use config values
@@ -91,15 +91,25 @@ final:
   eval_on_test: true
   output_name: final_model
 
-calibration:             # stage=calibrate: Platt scaling + F-beta thresholds on the calib split
+calibration:             # stage=calibrate, all on the calib split: 1) Viterbi biases, 2) Platt + thresholds
   model_dir: ${paths.output_dir}/${final.output_name}
-  max_docs: null         # cap on calib documents (null = all)
+  max_docs: null         # cap on calib documents (null = all); their log-probs are held in memory
+  beta: 1.0              # biases and thresholds maximise F-beta (beta > 1 favours recall)
+  bias_search:
+    enabled: true
+    num_samples: 100     # random candidates; trial 0 is always decode.biases
+    # Same format as tune.search_space, keyed by bias name. Unlisted biases keep their decode.biases
+    # value. background_stay is left out: adding one constant to all six biases changes no path.
+    search_space:
+      - {param: transition_bias_background_to_start, type: uniform, lower: -3.0, upper: 3.0}
+      - {param: transition_bias_end_to_start, type: uniform, lower: -3.0, upper: 3.0}
+      - {param: transition_bias_end_to_background, type: uniform, lower: -3.0, upper: 3.0}
+      - {param: transition_bias_inside_to_continue, type: uniform, lower: -3.0, upper: 3.0}
+      - {param: transition_bias_inside_to_end, type: uniform, lower: -3.0, upper: 3.0}
   per_type: true         # fit Platt and threshold per span type
   min_spans_per_type: 50 # fewer calibration spans than this -> global Platt fit and global threshold
   zero_positive_policy: global   # type with enough calib spans but none correct: global | reject (drop type)
-  beta: 1.0              # threshold maximises F-beta on the calib split (beta > 1 favours recall)
-  sensitivity: true      # also calibrate the document sensitivity head
-  eval_on_test: true     # report test metrics before / after calibration
+  eval_on_test: true     # report test metrics: config biases, chosen biases, chosen biases + thresholds
   output_file: calibration.json   # written into model_dir; stage=predict applies it when present
 
 predict:

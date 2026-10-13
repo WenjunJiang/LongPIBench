@@ -34,3 +34,5 @@ tune:
 
 calibration:
   min_spans_per_type: 10
+  bias_search:
+    num_samples: 16

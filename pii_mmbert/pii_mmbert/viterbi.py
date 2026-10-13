@@ -88,3 +88,39 @@ class ViterbiDecoder:
             last = int(back[t, last])
             path.append(last)
         return path[::-1]
+
+    def decode_batch(self, log_probs: list[torch.Tensor], batch_size: int = 256) -> list[list[int]]:
+        """decode() for many documents at once; returns the same paths, one list per document.
+
+        Documents are sorted by length and padded per batch. Padded steps keep their scores and use
+        identity back-pointers, so every document's path is decided by its own tokens only.
+        """
+        n_labels = self.trans.shape[0]
+        order = sorted(range(len(log_probs)), key=lambda i: log_probs[i].shape[0])
+        paths: list[list[int]] = [[] for _ in log_probs]
+        ident = torch.arange(n_labels, dtype=torch.uint8)
+        for k in range(0, len(order), batch_size):
+            idx = [i for i in order[k: k + batch_size] if log_probs[i].shape[0] > 0]
+            if not idx:
+                continue
+            lengths = torch.tensor([log_probs[i].shape[0] for i in idx])
+            T = int(lengths.max())
+            lp = torch.zeros((len(idx), T, n_labels))
+            for b, i in enumerate(idx):
+                lp[b, : lengths[b]] = log_probs[i].float()
+            scores = lp[:, 0] + self.start
+            back = torch.empty((max(T - 1, 0), len(idx), n_labels), dtype=torch.uint8)
+            for t in range(1, T):
+                best, arg = (scores.unsqueeze(2) + self.trans).max(dim=1)
+                active = (lengths > t).unsqueeze(1)
+                scores = torch.where(active, best + lp[:, t], scores)
+                back[t - 1] = torch.where(active, arg.to(torch.uint8), ident)
+            last = (scores + self.end).argmax(dim=1)
+            cols = [last]
+            for t in range(T - 2, -1, -1):
+                last = back[t].long().gather(1, last.unsqueeze(1)).squeeze(1)
+                cols.append(last)
+            full = torch.stack(cols[::-1], dim=1)
+            for b, i in enumerate(idx):
+                paths[i] = full[b, : lengths[b]].tolist()
+        return paths

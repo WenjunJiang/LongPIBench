@@ -1,4 +1,4 @@
-"""Pipeline stages: preprocess, tune (Ray Tune), final (train + test), predict."""
+"""Pipeline stages: preprocess, tune (Ray Tune), final (train + test), calibrate, predict."""
 
 from __future__ import annotations
 
@@ -11,7 +11,10 @@ from omegaconf import DictConfig, OmegaConf
 
 from .calibration import Calibrator, expected_calibration_error, fit_calibrator
 from .data import gold_spans, load_or_build, load_windows, windows_dir
-from .engine import evaluate, iter_predictions, pick_device, predict_document, special_ids, train
+from .decode_search import decode_cache, search_biases
+from .engine import (doc_log_probs, evaluate, pick_device, predict_document, score_prediction, special_ids,
+                     spans_from_path, train)
+from .metrics import SpanScorer
 from .model import load_model, save_model
 from .viterbi import ViterbiDecoder
 
@@ -164,60 +167,82 @@ def run_final(cfg: DictConfig, cli_overrides: list[str], resolve_path) -> dict:
     return metrics
 
 
-def _collect_calibration_records(model, docs, space, cfg, device, bos, eos, pad, max_docs):
-    """Span records [(type, raw_score, is_tp)], gold counts per type, sensitivity records [(logit, y)]."""
-    span_records, sens_records = [], []
-    gold_per_type = {t: 0 for t in space.span_types}
-    for row, pred in iter_predictions(model, docs, space, cfg, device, bos, eos, pad, max_docs):
-        gold = set(gold_spans(row))
-        for t, _, _ in gold:
-            gold_per_type[t] += 1
-        for sp, raw in zip(pred.spans, pred.scores):
-            span_records.append((sp[0], raw, int(sp in gold)))
-        if pred.sens_logit != float("-inf"):
-            sens_records.append((pred.sens_logit, int(len(row["sens_start"]) > 0)))
-    return span_records, gold_per_type, sens_records
+def _log_prob_cache(model, docs, space, cfg, device, bos, eos, pad, max_docs) -> list[dict]:
+    """Run the model once per document and keep what decoding and scoring need."""
+    if max_docs is not None:
+        docs = docs.select(range(min(int(max_docs), len(docs))))
+    return [{"text": row["text"], "offset_start": row["offset_start"], "offset_end": row["offset_end"],
+             "log_probs": doc_log_probs(model, row["input_ids"], space, cfg, device, bos, eos, pad),
+             "gold": set(gold_spans(row))}
+            for row in docs]
 
 
 def run_calibrate(cfg, resolve_path) -> dict:
-    """Fit Platt calibration and F-beta thresholds on the calib split of a trained model."""
+    """On the calib split of a trained model: choose Viterbi biases, then fit Platt calibration and
+    F-beta thresholds on the spans decoded with those biases. Both go into calibration.json."""
     model_dir = Path(resolve_path(cfg.calibration.model_dir))
     device = pick_device(cfg.train.device)
     model, space, meta = load_model(model_dir, device)
     run_cfg = OmegaConf.merge(cfg, {"data": {"max_length": meta["max_length"], "stride": meta["stride"]}})
     data = load_or_build(cfg, resolve_path)
     bos, eos, pad = special_ids(str(model_dir / "encoder"))
+    trim = bool(cfg.decode.trim_whitespace)
+    beta = float(cfg.calibration.beta)
+    base_biases = OmegaConf.to_container(cfg.decode.biases)
 
-    span_records, gold_per_type, sens_records = _collect_calibration_records(
-        model, data["calib"], space, run_cfg, device, bos, eos, pad, cfg.calibration.max_docs)
-    cal = fit_calibrator(span_records, gold_per_type, sens_records, cfg.calibration)
-    raw = [r for _, r, _ in span_records]
+    # 1. Viterbi biases, scored with a global threshold in the loop.
+    cache = _log_prob_cache(model, data["calib"], space, run_cfg, device, bos, eos, pad,
+                            cfg.calibration.max_docs)
+    if cfg.calibration.bias_search.enabled:
+        biases, search_report = search_biases(cache, space, base_biases, cfg.calibration.bias_search, beta,
+                                              trim, int(cfg.seed))
+    else:
+        biases, search_report = base_biases, {"enabled": False}
+    log.info("decode biases: %s", biases)
+
+    # 2. Platt scaling and thresholds on the spans those biases produce.
+    span_records, gold_per_type = [], {t: 0 for t in space.span_types}
+    for pred, c in zip(decode_cache(cache, space, biases, trim), cache):
+        for t, _, _ in c["gold"]:
+            gold_per_type[t] += 1
+        for sp, raw in zip(pred.spans, pred.scores):
+            span_records.append((sp[0], raw, int(sp in c["gold"])))
+    cal = fit_calibrator(span_records, gold_per_type, cfg.calibration, decode_biases=biases)
     tp = [t for _, _, t in span_records]
-    cal.report["calib_span_ece_raw"] = expected_calibration_error(raw, tp)
-    cal.report["calib_span_ece_platt"] = expected_calibration_error(
-        [cal.span_prob(t, r) for t, r, _ in span_records], tp)
-    cal.report["calib_docs"] = len(data["calib"]) if cfg.calibration.max_docs is None else min(
-        int(cfg.calibration.max_docs), len(data["calib"]))
+    cal.report.update({
+        "calib_docs": len(cache),
+        "bias_search": search_report,
+        "calib_span_ece_raw": expected_calibration_error([r for _, r, _ in span_records], tp),
+        "calib_span_ece_platt": expected_calibration_error([cal.span_prob(t, r) for t, r, _ in span_records], tp),
+    })
+    del cache
 
+    # 3. Test: config biases (before) -> chosen biases -> chosen biases + Platt/thresholds (after).
     if cfg.calibration.eval_on_test:
-        test_raw = evaluate(model, data["test"], space, run_cfg, device, bos, eos, pad)
-        test_cal = evaluate(model, data["test"], space, run_cfg, device, bos, eos, pad, calibrator=cal)
-        t_records, _, t_sens = _collect_calibration_records(model, data["test"], space, run_cfg, device,
-                                                            bos, eos, pad, cfg.eval.max_docs)
+        test = data["test"]
+        if cfg.eval.max_docs is not None:
+            test = test.select(range(min(int(cfg.eval.max_docs), len(test))))
+        base_dec, chosen_dec = ViterbiDecoder(space, base_biases), ViterbiDecoder(space, biases)
+        before, with_biases, after = (SpanScorer(space.span_types) for _ in range(3))
+        t_records = []
+        for row in test:
+            lp = doc_log_probs(model, row["input_ids"], space, run_cfg, device, bos, eos, pad)
+            args = (lp, row["text"], row["offset_start"], row["offset_end"], space, trim)
+            p_base = spans_from_path(base_dec.decode(lp), *args)
+            p_new = p_base if biases == base_biases else spans_from_path(chosen_dec.decode(lp), *args)
+            score_prediction(before, row, p_base)
+            score_prediction(with_biases, row, p_new)
+            score_prediction(after, row, p_new, calibrator=cal)
+            gold = set(gold_spans(row))
+            t_records += [(sp[0], raw, int(sp in gold)) for sp, raw in zip(p_new.spans, p_new.scores)]
         t_tp = [t for _, _, t in t_records]
-        cal.report["test_before"] = _clean(test_raw)
-        cal.report["test_after"] = _clean(test_cal)
-        cal.report["test_span_ece_raw"] = expected_calibration_error([r for _, r, _ in t_records], t_tp)
-        cal.report["test_span_ece_platt"] = expected_calibration_error(
-            [cal.span_prob(t, r) for t, r, _ in t_records], t_tp)
-        if cal.sens_platt is not None and t_sens:
-            y = [lab for _, lab in t_sens]
-            probs = [cal.sens_platt(s) for s, _ in t_sens]
-            pred = [p >= cal.sens_threshold for p in probs]
-            tp_s = sum(1 for p, l in zip(pred, y) if p and l)
-            cal.report["test_sensitivity"] = {
-                "precision": tp_s / max(1, sum(pred)), "recall": tp_s / max(1, sum(y)),
-                "ece": expected_calibration_error(probs, y)}
+        cal.report.update({
+            "test_before": _clean(before.result()),
+            "test_biases_only": _clean(with_biases.result()),
+            "test_after": _clean(after.result()),
+            "test_span_ece_raw": expected_calibration_error([r for _, r, _ in t_records], t_tp),
+            "test_span_ece_platt": expected_calibration_error([cal.span_prob(t, r) for t, r, _ in t_records], t_tp),
+        })
 
     out = model_dir / cfg.calibration.output_file
     cal.save(out)
@@ -238,18 +263,16 @@ def run_predict(cfg, resolve_path) -> list[dict]:
     ends = [b for _, b in enc["offset_mapping"]]
     bos, eos, pad = special_ids(str(model_dir / "encoder"))
     run_cfg = OmegaConf.merge(cfg, {"data": {"max_length": meta["max_length"], "stride": meta["stride"]}})
-    decoder = ViterbiDecoder(space, dict(cfg.decode.biases))
-    pred = predict_document(model, text, enc["input_ids"], starts, ends, space, decoder, run_cfg,
-                            device, bos, eos, pad)
+    # The decoder must match the one calibration was fitted with: biases come from calibration.json
+    # when present, otherwise from the model's own metadata (decode.biases at training time).
     cal_path = model_dir / cfg.calibration.output_file
-    result = {"text": text, "calibrated": cal_path.exists()}
-    if cal_path.exists():
-        cal = Calibrator.load(cal_path)
-        kept = cal.keep(pred.spans, pred.scores)
-        spans = [(pred.spans[i], p) for i, p in kept]
-        sens = cal.sensitivity(pred.sens_logit)
-        if sens is not None:
-            result["sensitivity"] = {"probability": sens[0], "sensitive": bool(sens[1])}
+    cal = Calibrator.load(cal_path) if cal_path.exists() else None
+    biases = cal.decode_biases if cal is not None and cal.decode_biases else meta["decode_biases"]
+    pred = predict_document(model, text, enc["input_ids"], starts, ends, space, ViterbiDecoder(space, biases),
+                            run_cfg, device, bos, eos, pad)
+    result = {"text": text, "calibrated": cal is not None}
+    if cal is not None:
+        spans = [(pred.spans[i], p) for i, p in cal.keep(pred.spans, pred.scores)]
     else:
         spans = list(zip(pred.spans, pred.scores))
     result["detected_spans"] = [{"label": t, "start": s, "end": e, "text": text[s:e], "score": round(p, 4)}

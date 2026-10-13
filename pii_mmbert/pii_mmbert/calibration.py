@@ -1,4 +1,7 @@
-"""Platt calibration of span and sensitivity scores, and F-beta threshold selection.
+"""Platt calibration of span scores and F-beta threshold selection.
+
+These are fitted on spans decoded with the Viterbi biases chosen on the same calib split
+(decode_search.py); the biases are stored with the calibration so predict uses the same decoder.
 
 Span calibration
     Input score: logit of the span's raw confidence (mean probability of the decoded labels).
@@ -10,10 +13,6 @@ Span calibration
 Threshold
     Chosen on the calibration set to maximise F-beta, where recall's denominator is the number of gold
     spans (including gold spans the decoder never proposed), so the threshold cannot overstate recall.
-
-Sensitivity
-    Input score: the document's max window sensitivity logit. Target: the document contains a span
-    whose source label is in sensitive_source_labels. Same Platt fit and F-beta threshold.
 """
 
 from __future__ import annotations
@@ -112,8 +111,7 @@ def expected_calibration_error(probs: list[float], labels: list[int], bins: int 
 class Calibrator:
     span_platt: dict = field(default_factory=dict)        # type -> Platt (or "__all__")
     span_threshold: dict = field(default_factory=dict)    # type -> threshold (or "__all__")
-    sens_platt: Platt | None = None
-    sens_threshold: float | None = None
+    decode_biases: dict = field(default_factory=dict)     # Viterbi biases the spans were decoded with
     report: dict = field(default_factory=dict)
 
     def span_prob(self, span_type: str, raw_score: float) -> float:
@@ -130,20 +128,11 @@ class Calibrator:
                 out.append((i, p))
         return out
 
-    def sensitivity(self, sens_logit: float) -> tuple[float, bool] | None:
-        if self.sens_platt is None:
-            return None
-        if not math.isfinite(sens_logit):
-            return 0.0, False
-        p = self.sens_platt(sens_logit)
-        return p, p >= (self.sens_threshold or 0.5)
-
     def save(self, path: Path) -> None:
         payload = {
             "span_platt": {k: asdict(v) for k, v in self.span_platt.items()},
             "span_threshold": self.span_threshold,
-            "sens_platt": asdict(self.sens_platt) if self.sens_platt else None,
-            "sens_threshold": self.sens_threshold,
+            "decode_biases": self.decode_biases,
             "report": self.report,
         }
         path.write_text(json.dumps(payload, indent=2))
@@ -152,18 +141,16 @@ class Calibrator:
     def load(cls, path: Path) -> "Calibrator":
         d = json.loads(path.read_text())
         return cls(span_platt={k: Platt(**v) for k, v in d["span_platt"].items()},
-                   span_threshold=d["span_threshold"],
-                   sens_platt=Platt(**d["sens_platt"]) if d["sens_platt"] else None,
-                   sens_threshold=d["sens_threshold"], report=d.get("report", {}))
+                   span_threshold=d["span_threshold"], decode_biases=d.get("decode_biases", {}),
+                   report=d.get("report", {}))
 
 
-def fit_calibrator(span_records, gold_per_type: dict, sens_records, cfg_cal) -> Calibrator:
-    """span_records: [(type, raw_score, is_tp)]; gold_per_type: {type: n_gold};
-    sens_records: [(sens_logit, label)] or empty."""
+def fit_calibrator(span_records, gold_per_type: dict, cfg_cal, decode_biases: dict | None = None) -> Calibrator:
+    """span_records: [(type, raw_score, is_tp)]; gold_per_type: {type: n_gold}."""
     beta, min_n = float(cfg_cal.beta), int(cfg_cal.min_spans_per_type)
     if cfg_cal.zero_positive_policy not in ("global", "reject"):
         raise ValueError("calibration.zero_positive_policy must be 'global' or 'reject'")
-    cal = Calibrator()
+    cal = Calibrator(decode_biases=dict(decode_biases or {}))
     all_scores = [logit(r) for _, r, _ in span_records]
     all_tp = [int(t) for _, _, t in span_records]
     cal.span_platt["__all__"] = fit_platt(all_scores, all_tp)
@@ -197,13 +184,4 @@ def fit_calibrator(span_records, gold_per_type: dict, sens_records, cfg_cal) -> 
             cal.span_threshold[typ] = best["threshold"]
             cal.report["spans"][typ] = {**entry, **best}
 
-    if sens_records and cfg_cal.sensitivity:
-        scores = [s for s, _ in sens_records]
-        labels = [int(y) for _, y in sens_records]
-        cal.sens_platt = fit_platt(scores, labels)
-        probs = [cal.sens_platt(s) for s in scores]
-        best = best_threshold(probs, labels, sum(labels), beta)
-        cal.sens_threshold = best["threshold"]
-        cal.report["sensitivity"] = {"n": len(labels), "positives": sum(labels), **best,
-                                     "ece": expected_calibration_error(probs, labels)}
     return cal
