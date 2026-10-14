@@ -78,30 +78,55 @@ class DocPrediction:
 
 
 @torch.no_grad()
-def doc_log_probs(model, input_ids, space: LabelSpace, cfg, device, bos_id: int, eos_id: int,
-                  pad_id: int) -> torch.Tensor:
-    """[n_tokens, num_labels] log-probs; overlapping windows are averaged per token."""
-    n = len(input_ids)
-    if n == 0:
-        return torch.zeros((0, space.num_labels))
-    windows = [{"token_start": st, "input_ids": ids}
-               for st, ids, _ in doc_windows(input_ids, None, cfg.data.max_length, cfg.data.stride,
-                                             bos_id, eos_id, with_labels=False)]
-    acc = torch.full((n, space.num_labels), -math.inf)
-    count = torch.zeros(n)
-    bs = max(1, int(cfg.train.batch_size))
+def batch_log_probs(model, input_ids_list, space: LabelSpace, cfg, device, bos_id: int, eos_id: int,
+                    pad_id: int) -> list[torch.Tensor]:
+    """[n_tokens, num_labels] log-probs for each document; overlapping windows are averaged per token.
+
+    The windows of all documents are sorted by length and run in batches of eval.batch_size, so short
+    documents share a forward pass and padding stays small.
+    """
+    windows = []  # (doc index, token_start, window ids)
+    for d, input_ids in enumerate(input_ids_list):
+        if len(input_ids):
+            for st, ids, _ in doc_windows(input_ids, None, cfg.data.max_length, cfg.data.stride,
+                                          bos_id, eos_id, with_labels=False):
+                windows.append((d, st, ids))
+    acc = [torch.full((len(ids), space.num_labels), -math.inf) for ids in input_ids_list]
+    count = [torch.zeros(len(ids)) for ids in input_ids_list]
+    windows.sort(key=lambda w: len(w[2]))
+    bs = max(1, int(cfg.eval.get("batch_size") or cfg.train.batch_size))
     for i in range(0, len(windows), bs):
         chunk = windows[i: i + bs]
-        ids, mask, _ = collate(chunk, pad_id)
+        ids, mask, _ = collate([{"input_ids": w} for _, _, w in chunk], pad_id)
         with _autocast(device, cfg.train.amp):
             logits = model(ids.to(device), mask.to(device))
         lp = F.log_softmax(logits.float(), dim=-1).cpu()
-        for w, row in zip(chunk, lp):
-            m = len(w["input_ids"]) - 2
-            sl = slice(w["token_start"], w["token_start"] + m)
-            acc[sl] = torch.logaddexp(acc[sl], row[1: 1 + m])
-            count[sl] += 1
-    return acc - torch.log(count.clamp(min=1)).unsqueeze(1)
+        for (d, st, w), row in zip(chunk, lp):
+            m = len(w) - 2
+            sl = slice(st, st + m)
+            acc[d][sl] = torch.logaddexp(acc[d][sl], row[1: 1 + m])
+            count[d][sl] += 1
+    return [a - torch.log(c.clamp(min=1)).unsqueeze(1) for a, c in zip(acc, count)]
+
+
+def doc_log_probs(model, input_ids, space: LabelSpace, cfg, device, bos_id: int, eos_id: int,
+                  pad_id: int) -> torch.Tensor:
+    """[n_tokens, num_labels] log-probs of one document."""
+    return batch_log_probs(model, [input_ids], space, cfg, device, bos_id, eos_id, pad_id)[0]
+
+
+def iter_log_probs(model, docs, space: LabelSpace, cfg, device, bos_id, eos_id, pad_id, max_docs=None,
+                   what: str = "evaluating"):
+    """Yield (rows, log_probs) per group of eval.batch_docs documents of a document Dataset."""
+    model.eval()
+    docs = subset(docs, max_docs, int(cfg.seed))
+    group = max(1, int(cfg.eval.get("batch_docs") or 1))
+    progress = Progress(what, len(docs), cfg.eval.get("log_every", 0))
+    for start in range(0, len(docs), group):
+        rows = docs.select(range(start, min(start + group, len(docs)))).to_list()
+        yield rows, batch_log_probs(model, [r["input_ids"] for r in rows], space, cfg, device,
+                                    bos_id, eos_id, pad_id)
+        progress.step(len(rows))
 
 
 def spans_from_path(path: list[int], log_probs: torch.Tensor, text: str, offset_start, offset_end,
@@ -141,9 +166,9 @@ class Progress:
         self.what, self.total, self.every = what, total, int(every or 0)
         self.done, self.t0 = 0, time.time()
 
-    def step(self) -> None:
-        self.done += 1
-        if self.every and (self.done % self.every == 0 or self.done == self.total):
+    def step(self, n: int = 1) -> None:
+        before, self.done = self.done, self.done + n
+        if self.every and (self.done // self.every > before // self.every or self.done == self.total):
             rate = (time.time() - self.t0) / self.done
             log.info("%s: %d/%d documents, %.3f s/doc, ~%.1f min left", self.what, self.done, self.total,
                      rate, rate * (self.total - self.done) / 60)
@@ -151,15 +176,12 @@ class Progress:
 
 def iter_predictions(model, docs, space: LabelSpace, cfg, device, bos_id, eos_id, pad_id, max_docs=None,
                      what: str = "evaluating"):
-    """Yield (row, DocPrediction) for a document Dataset (memory-mapped; rows read one at a time)."""
-    model.eval()
+    """Yield (row, DocPrediction) for a document Dataset, batched over eval.batch_docs documents."""
     decoder = ViterbiDecoder(space, dict(cfg.decode.biases))
-    docs = subset(docs, max_docs, int(cfg.seed))
-    progress = Progress(what, len(docs), cfg.eval.get("log_every", 0))
-    for row in docs:
-        yield row, predict_document(model, row["text"], row["input_ids"], row["offset_start"],
-                                    row["offset_end"], space, decoder, cfg, device, bos_id, eos_id, pad_id)
-        progress.step()
+    for rows, lps in iter_log_probs(model, docs, space, cfg, device, bos_id, eos_id, pad_id, max_docs, what):
+        for row, lp, path in zip(rows, lps, decoder.decode_batch(lps)):
+            yield row, spans_from_path(path, lp, row["text"], row["offset_start"], row["offset_end"], space,
+                                       cfg.decode.trim_whitespace)
 
 
 def score_prediction(scorer: SpanScorer, row, pred: DocPrediction, calibrator=None) -> None:

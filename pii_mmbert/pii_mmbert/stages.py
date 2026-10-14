@@ -10,10 +10,10 @@ from pathlib import Path
 from omegaconf import DictConfig, OmegaConf
 
 from .calibration import Calibrator, expected_calibration_error, fit_calibrator
-from .data import gold_spans, load_or_build, load_windows, subset, windows_dir
+from .data import gold_spans, load_or_build, load_windows, windows_dir
 from .decode_search import decode_cache, search_biases
-from .engine import (Progress, doc_log_probs, evaluate, pick_device, predict_document, score_prediction,
-                     special_ids, spans_from_path, train)
+from .engine import (evaluate, iter_log_probs, pick_device, predict_document, score_prediction, special_ids,
+                     spans_from_path, train)
 from .metrics import SpanScorer
 from .model import load_model, save_model
 from .viterbi import ViterbiDecoder
@@ -185,14 +185,10 @@ def run_final(cfg: DictConfig, cli_overrides: list[str], resolve_path) -> dict:
 
 def _log_prob_cache(model, docs, space, cfg, device, bos, eos, pad, max_docs) -> list[dict]:
     """Run the model once per document and keep what decoding and scoring need."""
-    docs = subset(docs, max_docs, int(cfg.seed))
-    progress = Progress("calib log-probs", len(docs), cfg.eval.get("log_every", 0))
     cache = []
-    for row in docs:
-        cache.append({"text": row["text"], "offset_start": row["offset_start"], "offset_end": row["offset_end"],
-                      "log_probs": doc_log_probs(model, row["input_ids"], space, cfg, device, bos, eos, pad),
-                      "gold": set(gold_spans(row))})
-        progress.step()
+    for rows, lps in iter_log_probs(model, docs, space, cfg, device, bos, eos, pad, max_docs, "calib log-probs"):
+        cache += [{"text": r["text"], "offset_start": r["offset_start"], "offset_end": r["offset_end"],
+                   "log_probs": lp, "gold": set(gold_spans(r))} for r, lp in zip(rows, lps)]
     return cache
 
 
@@ -238,22 +234,22 @@ def run_calibrate(cfg, resolve_path) -> dict:
 
     # 3. Test: config biases (before) -> chosen biases -> chosen biases + Platt/thresholds (after).
     if cfg.calibration.eval_on_test:
-        test = subset(data["test"], cfg.eval.max_docs, int(cfg.seed))
         base_dec, chosen_dec = ViterbiDecoder(space, base_biases), ViterbiDecoder(space, biases)
         before, with_biases, after = (SpanScorer(space.span_types) for _ in range(3))
         t_records = []
-        progress = Progress("test", len(test), cfg.eval.get("log_every", 0))
-        for row in test:
-            progress.step()
-            lp = doc_log_probs(model, row["input_ids"], space, run_cfg, device, bos, eos, pad)
-            args = (lp, row["text"], row["offset_start"], row["offset_end"], space, trim)
-            p_base = spans_from_path(base_dec.decode(lp), *args)
-            p_new = p_base if biases == base_biases else spans_from_path(chosen_dec.decode(lp), *args)
-            score_prediction(before, row, p_base)
-            score_prediction(with_biases, row, p_new)
-            score_prediction(after, row, p_new, calibrator=cal)
-            gold = set(gold_spans(row))
-            t_records += [(sp[0], raw, int(sp in gold)) for sp, raw in zip(p_new.spans, p_new.scores)]
+        for rows, lps in iter_log_probs(model, data["test"], space, run_cfg, device, bos, eos, pad,
+                                        cfg.eval.max_docs, "test"):
+            base_paths = base_dec.decode_batch(lps)
+            new_paths = base_paths if biases == base_biases else chosen_dec.decode_batch(lps)
+            for row, lp, pb, pn in zip(rows, lps, base_paths, new_paths):
+                args = (lp, row["text"], row["offset_start"], row["offset_end"], space, trim)
+                p_base = spans_from_path(pb, *args)
+                p_new = p_base if pn is pb else spans_from_path(pn, *args)
+                score_prediction(before, row, p_base)
+                score_prediction(with_biases, row, p_new)
+                score_prediction(after, row, p_new, calibrator=cal)
+                gold = set(gold_spans(row))
+                t_records += [(sp[0], raw, int(sp in gold)) for sp, raw in zip(p_new.spans, p_new.scores)]
         t_tp = [t for _, _, t in t_records]
         cal.report.update({
             "test_before": _clean(before.result()),

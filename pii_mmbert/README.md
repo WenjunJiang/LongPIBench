@@ -181,6 +181,11 @@ Outputs:
   runs two trials at a time. Fractional GPUs share the card's memory, so lower `train.batch_size` if two trials
   run out of memory together. A custom resource the cluster does not have only logs a warning (trials then
   stay PENDING). Edit `custom` in `conf/config.yaml`, or set `tune.resources_per_trial.custom=null` to drop it.
+- **Batched evaluation**: validation, test and calibration passes take `eval.batch_docs` documents at a time
+  (default 256): their windows are sorted by length and run in forward passes of `eval.batch_size` windows
+  (default 64), and Viterbi decodes the group at once. On 400 test documents (CPU) the metrics were identical
+  to one-document-at-a-time evaluation; Viterbi took 1.1 instead of 8.5 ms per document, while the forward
+  pass dominated on CPU (overall 219 → 151 ms per document). Progress is logged every `eval.log_every` documents.
 - **Evaluation subsets**: `eval.max_docs` takes a seeded random sample (`data.subset`), not the first rows:
   Nemotron's test file lists all 50,000 `us` rows before the `intl` rows. Any two evaluations with the same
   `eval.max_docs` and `seed` score the same documents.
