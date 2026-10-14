@@ -91,6 +91,7 @@ python main.py stage=final final.best_params_path=outputs/tune/best_params.json 
 python main.py stage=calibrate
 python main.py stage=calibrate calibration.beta=2.0                      # favour recall
 python main.py stage=calibrate calibration.bias_search.enabled=false     # keep decode.biases
+python main.py stage=calibrate calibration.bias_search.num_samples=30    # faster search (default 100, ~15-20 min)
 
 # 5. Test: score the model on the test split -> test_metrics.json (before / after calibration)
 python main.py stage=test

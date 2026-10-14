@@ -103,7 +103,8 @@ calibration:             # stage=calibrate, all on the calib split: 1) Viterbi b
   beta: 1.0              # biases and thresholds maximise F-beta (beta > 1 favours recall)
   bias_search:
     enabled: true
-    num_samples: 100     # random candidates; trial 0 is always decode.biases
+    num_samples: 100     # random candidates; trial 0 is always decode.biases. Each re-decodes the whole calib
+                         # split (~10 s on CPU for 5,030 documents), so 100 takes ~15-20 min
     min_improvement: 0.005   # keep decode.biases unless the best candidate gains at least this much F-beta
     # Same format as tune.search_space, keyed by bias name. Unlisted biases keep their decode.biases
     # value. background_stay is left out: adding one constant to all six biases changes no path.

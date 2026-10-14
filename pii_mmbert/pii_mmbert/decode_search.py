@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 
 import numpy as np
 
@@ -86,12 +87,16 @@ def search_biases(cache: list[dict], space: LabelSpace, base_biases: dict, cfg_s
     candidates = [dict(base_biases)]
     candidates += [dict(base_biases, **sample_params(entries, rng)) for _ in range(int(cfg_search.num_samples))]
     trials = []
+    log.info("bias search: %d candidates on %d calib documents (each re-runs Viterbi on all of them)",
+             len(candidates), len(cache))
+    t0 = time.time()
     for i, biases in enumerate(candidates):
         res = score_biases(cache, space, biases, beta, trim_whitespace)
         trials.append({"trial": i, "biases": biases, **res})
-        if i == 0 or (i + 1) % 10 == 0:
-            log.info("bias search %d/%d: best F-beta so far %.4f", i + 1, len(candidates),
-                     max(t["f_beta"] for t in trials))
+        if i == 0 or (i + 1) % 10 == 0 or i + 1 == len(candidates):
+            per = (time.time() - t0) / (i + 1)
+            log.info("bias search %d/%d: best F-beta so far %.4f, %.1f s/candidate, ~%.1f min left", i + 1,
+                     len(candidates), max(t["f_beta"] for t in trials), per, per * (len(candidates) - i - 1) / 60)
     best = max(trials, key=lambda t: (t["f_beta"], -t["trial"]))   # ties keep the earlier trial
     min_gain = float(cfg_search.min_improvement)
     accepted = best["f_beta"] - trials[0]["f_beta"] >= min_gain and best["trial"] != 0
