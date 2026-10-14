@@ -4,7 +4,7 @@ defaults:
   - label_map: nemotron_to_opf_v2
   - _self_
 
-stage: preprocess        # preprocess | tune | final | calibrate | predict | baseline_opf
+stage: preprocess        # preprocess | tune | final | calibrate | test | predict | baseline_opf
 seed: 13
 
 paths:                   # relative paths are resolved against the directory main.py is launched from
@@ -116,7 +116,6 @@ calibration:             # stage=calibrate, all on the calib split: 1) Viterbi b
   per_type: true         # fit Platt and threshold per span type
   min_spans_per_type: 50 # fewer calibration spans than this -> global Platt fit and global threshold
   zero_positive_policy: global   # type with enough calib spans but none correct: global | reject (drop type)
-  eval_on_test: true     # report test metrics: config biases, chosen biases, chosen biases + thresholds
   output_file: calibration.json   # written into model_dir; stage=predict applies it when present
 
 baseline:                # stage=baseline_opf: OpenAI Privacy Filter on the same test docs (eval.max_docs sample)
@@ -125,6 +124,10 @@ baseline:                # stage=baseline_opf: OpenAI Privacy Filter on the same
     device: auto         # auto | cpu | cuda
     context_window_length: null   # null = OPF default (128,000 tokens on GPU, 4,096 on CPU)
     output_name: baseline_opf     # outputs/<name>/: run.json, predictions.jsonl (resumable), metrics.json
+
+test:                    # stage=test: score a trained model on the test split (the eval.max_docs sample)
+  model_dir: ${paths.output_dir}/${final.output_name}
+  output_file: test_metrics.json  # written into model_dir; with calibration.json: before / biases_only / after
 
 predict:
   model_dir: ${paths.output_dir}/${final.output_name}

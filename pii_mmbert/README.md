@@ -81,19 +81,26 @@ python main.py stage=preprocess
 python main.py stage=tune
 python main.py stage=tune tune.num_samples=32 tune.max_concurrent_trials=4 train.epochs=4
 
-# 3. Final model: defaults < tuned best params < command-line overrides
-python main.py stage=final final.best_params_path=outputs/tune/best_params.json
-python main.py stage=final final.best_params_path=outputs/tune/best_params.json train.epochs=5 train.lr=3e-5
+# 3. Final model: defaults < tuned best params < command-line overrides.
+#    final.eval_on_test=false skips the test pass here; step 5 scores the test set (see below).
+python main.py stage=final final.best_params_path=outputs/tune/best_params.json final.eval_on_test=false
+python main.py stage=final final.best_params_path=outputs/tune/best_params.json final.eval_on_test=false \
+    train.epochs=5 train.lr=3e-5
 
 # 4. Calibrate on the held-out calib split: Viterbi biases, then Platt + F-beta thresholds -> calibration.json
 python main.py stage=calibrate
 python main.py stage=calibrate calibration.beta=2.0                      # favour recall
 python main.py stage=calibrate calibration.bias_search.enabled=false     # keep decode.biases
 
-# 5. Predict (applies calibration.json when present: its biases, calibrated scores, thresholded spans)
+# 5. Test: score the model on the test split -> test_metrics.json (before / after calibration)
+python main.py stage=test
+python main.py stage=test eval.max_docs=10000                           # seeded sample, for a quick number
+python main.py stage=test eval.batch_size=256 eval.batch_docs=1024      # larger batches if GPU memory allows
+
+# 6. Predict (applies calibration.json when present: its biases, calibrated scores, thresholded spans)
 python main.py stage=predict predict.text="Call Kim Min-jun at 010-1234-5678"
 
-# 6. Baseline: OpenAI Privacy Filter on the same test documents and metrics (needs the opf package)
+# 7. Baseline: OpenAI Privacy Filter on the same test documents and metrics (needs the opf package)
 python main.py stage=baseline_opf                       # whole test set (use a GPU)
 python main.py stage=baseline_opf eval.max_docs=5000    # seeded sample; same docs as any eval with 5000
 
@@ -101,13 +108,25 @@ python main.py stage=baseline_opf eval.max_docs=5000    # seeded sample; same do
 python main.py +experiment=smoke stage=tune
 ```
 
+Test evaluation runs once, in `stage=test`. `stage=final` can also score the test set (`final.eval_on_test=true`,
+the default), but that pass takes long on all 100,000 test documents and gives the same numbers as the
+`before` block of `stage=test`, so the commands above turn it off. `stage=test` can run before or after
+`stage=calibrate`: without `calibration.json` it reports the model as trained; with it, the same documents
+three ways (see Outputs). Evaluation is batched (`eval.batch_docs` documents decoded together, `eval.batch_size`
+windows per forward pass) and logs progress with an estimate of the time left every `eval.log_every` documents.
+Use `eval.max_docs` for a seeded sample: two runs with the same value and `seed` score the same documents,
+which keeps `stage=test` and `stage=baseline_opf` comparable.
+
 Outputs:
 
 - `outputs/tune/best_params.json`, `summary.json`, `trials.csv`, `ray_results/`
 - `outputs/baseline_opf/`: `run.json`, `predictions.jsonl` (appended per document; a rerun resumes), `metrics.json`
 - `outputs/final_model/`: `encoder/` (Hugging Face format + tokenizer), `heads.pt`, `pii_tagger.json`
   (labels, decode biases, window settings), `resolved_config.yaml`, `metrics.json`, and after
-  `stage=calibrate` `calibration.json` (decode biases, Platt parameters, thresholds, search and test report)
+  `stage=calibrate` `calibration.json` (decode biases, Platt parameters, thresholds, search report), and after
+  `stage=test` `test_metrics.json`: `before` (training-time biases, no thresholds); with `calibration.json` also
+  `biases_only` (calibrated biases), `after` (calibrated biases + thresholds, what `stage=predict` does), and span
+  ECE before and after Platt scaling
 
 ## Design notes
 
@@ -157,8 +176,8 @@ Outputs:
   - `calibration.json` stores the chosen biases; `stage=predict` decodes with them (falling back to the
     model's `pii_tagger.json` biases without a calibration file), so prediction uses the decoder the
     thresholds were fitted for.
-  - The report has the search (baseline, best, top 5), ECE before and after Platt on calib and test, and test
-    metrics three ways: `test_before` (config biases, no thresholds), `test_biases_only`, and `test_after`.
+  - The report has the search (baseline, best, top 5) and the span ECE before and after Platt on calib.
+    Test-set numbers come from `stage=test`.
 - **Storage**: preprocessed documents and training windows are Hugging Face `datasets` written with
   `save_to_disk` under `cache/nemotron_<hash>/` (`train`, `val`, `calib`, `test`,
   `windows_<split>_L<len>_S<stride>`).

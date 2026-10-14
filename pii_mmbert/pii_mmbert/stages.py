@@ -232,38 +232,66 @@ def run_calibrate(cfg, resolve_path) -> dict:
     })
     del cache
 
-    # 3. Test: config biases (before) -> chosen biases -> chosen biases + Platt/thresholds (after).
-    if cfg.calibration.eval_on_test:
-        base_dec, chosen_dec = ViterbiDecoder(space, base_biases), ViterbiDecoder(space, biases)
-        before, with_biases, after = (SpanScorer(space.span_types) for _ in range(3))
-        t_records = []
-        for rows, lps in iter_log_probs(model, data["test"], space, run_cfg, device, bos, eos, pad,
-                                        cfg.eval.max_docs, "test"):
-            base_paths = base_dec.decode_batch(lps)
-            new_paths = base_paths if biases == base_biases else chosen_dec.decode_batch(lps)
-            for row, lp, pb, pn in zip(rows, lps, base_paths, new_paths):
-                args = (lp, row["text"], row["offset_start"], row["offset_end"], space, trim)
-                p_base = spans_from_path(pb, *args)
-                p_new = p_base if pn is pb else spans_from_path(pn, *args)
-                score_prediction(before, row, p_base)
-                score_prediction(with_biases, row, p_new)
-                score_prediction(after, row, p_new, calibrator=cal)
-                gold = set(gold_spans(row))
-                t_records += [(sp[0], raw, int(sp in gold)) for sp, raw in zip(p_new.spans, p_new.scores)]
-        t_tp = [t for _, _, t in t_records]
-        cal.report.update({
-            "test_before": _clean(before.result()),
-            "test_biases_only": _clean(with_biases.result()),
-            "test_after": _clean(after.result()),
-            "test_span_ece_raw": expected_calibration_error([r for _, r, _ in t_records], t_tp),
-            "test_span_ece_platt": expected_calibration_error([cal.span_prob(t, r) for t, r, _ in t_records], t_tp),
-        })
-
     out = model_dir / cfg.calibration.output_file
     cal.save(out)
     log.info("calibration report:\n%s", json.dumps(cal.report, indent=2))
     log.info("wrote %s", out)
     return cal.report
+
+
+def run_test(cfg, resolve_path) -> dict:
+    """Score a trained model on the test split (the eval.max_docs sample).
+
+    Without calibration.json: span/token metrics with the decode biases the model was trained with.
+    With it, three settings on the same documents: `before` (training-time biases, no thresholds),
+    `biases_only` (the calibrated biases), `after` (calibrated biases + Platt/thresholds, as predict uses),
+    plus span ECE before and after Platt scaling.
+    """
+    model_dir = Path(resolve_path(cfg.test.model_dir))
+    device = pick_device(cfg.train.device)
+    model, space, meta = load_model(model_dir, device)
+    run_cfg = OmegaConf.merge(cfg, {"data": {"max_length": meta["max_length"], "stride": meta["stride"]}})
+    data = load_or_build(cfg, resolve_path)
+    bos, eos, pad = special_ids(str(model_dir / "encoder"))
+    trim = bool(cfg.decode.trim_whitespace)
+    cal_path = model_dir / cfg.calibration.output_file
+    cal = Calibrator.load(cal_path) if cal_path.exists() else None
+    base_biases = meta["decode_biases"]
+    biases = cal.decode_biases if cal is not None and cal.decode_biases else base_biases
+    log.info("testing %s (%s)", model_dir, "with " + str(cal_path) if cal else "no calibration.json")
+
+    base_dec, chosen_dec = ViterbiDecoder(space, base_biases), ViterbiDecoder(space, biases)
+    before, with_biases, after = (SpanScorer(space.span_types) for _ in range(3))
+    records = []
+    for rows, lps in iter_log_probs(model, data["test"], space, run_cfg, device, bos, eos, pad,
+                                    cfg.eval.max_docs, "test"):
+        base_paths = base_dec.decode_batch(lps)
+        new_paths = base_paths if biases == base_biases else chosen_dec.decode_batch(lps)
+        for row, lp, pb, pn in zip(rows, lps, base_paths, new_paths):
+            args = (lp, row["text"], row["offset_start"], row["offset_end"], space, trim)
+            p_base = spans_from_path(pb, *args)
+            score_prediction(before, row, p_base)
+            if cal is not None:
+                p_new = p_base if pn is pb else spans_from_path(pn, *args)
+                score_prediction(with_biases, row, p_new)
+                score_prediction(after, row, p_new, calibrator=cal)
+                gold = set(gold_spans(row))
+                records += [(sp[0], raw, int(sp in gold)) for sp, raw in zip(p_new.spans, p_new.scores)]
+
+    report = {"model_dir": str(model_dir), "calibrated": cal is not None, "before": _clean(before.result())}
+    if cal is not None:
+        tp = [t for _, _, t in records]
+        report.update({
+            "biases_only": _clean(with_biases.result()),
+            "after": _clean(after.result()),
+            "span_ece_raw": expected_calibration_error([r for _, r, _ in records], tp),
+            "span_ece_platt": expected_calibration_error([cal.span_prob(t, r) for t, r, _ in records], tp),
+        })
+    out = model_dir / cfg.test.output_file
+    out.write_text(json.dumps(report, indent=2))
+    log.info("test report:\n%s", json.dumps(report, indent=2))
+    log.info("wrote %s", out)
+    return report
 
 
 def run_predict(cfg, resolve_path) -> list[dict]:
