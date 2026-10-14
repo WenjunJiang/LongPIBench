@@ -37,3 +37,22 @@ def test_batched_log_probs_match_per_token_reference():
                 assert torch.allclose(lp, ref, atol=1e-5)
                 single = doc_log_probs(model, ids, SPACE, _cfg(1), "cpu", 2, 1, 0)
                 assert torch.allclose(lp, single, atol=1e-5)
+
+
+def test_available_cpus_respects_cgroup_quota(tmp_path):
+    import os
+    from pii_mmbert.engine import available_cpus
+    host = len(os.sched_getaffinity(0))
+    v2 = tmp_path / "v2"
+    v2.mkdir()
+    (v2 / "cpu.max").write_text("150000 100000\n")          # 1.5 CPUs -> 2 threads
+    assert available_cpus(str(v2)) == min(host, 2)
+    (v2 / "cpu.max").write_text("max 100000\n")             # no quota
+    assert available_cpus(str(v2)) == host
+    v1 = tmp_path / "v1" / "cpu"
+    v1.mkdir(parents=True)
+    (v1 / "cpu.cfs_quota_us").write_text("100000\n")
+    (v1 / "cpu.cfs_period_us").write_text("100000\n")
+    assert available_cpus(str(tmp_path / "v1")) == 1
+    (v1 / "cpu.cfs_quota_us").write_text("-1\n")
+    assert available_cpus(str(tmp_path / "v1")) == host

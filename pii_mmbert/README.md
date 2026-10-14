@@ -206,6 +206,12 @@ Outputs:
   (default 64), and Viterbi decodes the group at once. On 400 test documents (CPU) the metrics were identical
   to one-document-at-a-time evaluation; Viterbi took 1.1 instead of 8.5 ms per document, while the forward
   pass dominated on CPU (overall 219 → 151 ms per document). Progress is logged every `eval.log_every` documents.
+- **CPU threads**: every stage sets torch's CPU thread count at start (logged as `torch CPU threads: N`):
+  `train.num_threads` if set, else the cores this process may use, i.e. its CPU affinity capped by a cgroup
+  CPU quota (`cpu.max`, or `cpu.cfs_quota_us` / `cpu.cfs_period_us`). Containers often show every host core
+  while granting only a few; torch's own default then oversubscribes them, and the many small CPU ops in
+  Viterbi decoding slow down sharply (here, on 4 cores: 0.49 ms per document at 4 threads, 10.4 ms at 128).
+  If the logged number looks wrong for your machine, set `train.num_threads`.
 - **Evaluation subsets**: `eval.max_docs` takes a seeded random sample (`data.subset`), not the first rows:
   Nemotron's test file lists all 50,000 `us` rows before the `intl` rows. Any two evaluations with the same
   `eval.max_docs` and `seed` score the same documents.

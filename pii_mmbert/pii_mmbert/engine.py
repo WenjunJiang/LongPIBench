@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import random
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from functools import partial
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -30,6 +32,39 @@ def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+
+
+def available_cpus(cgroup_root: str = "/sys/fs/cgroup") -> int:
+    """CPU cores this process may use: its CPU affinity, capped by a cgroup CPU quota.
+
+    Containers (e.g. Kubernetes notebooks) often limit CPU with a quota while still showing every host
+    core; torch's default thread count then follows the host and oversubscribes the few cores granted,
+    which makes many small CPU tensor ops (Viterbi) orders of magnitude slower.
+    """
+    n = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+    root = Path(cgroup_root)
+    try:                                                    # cgroup v2: "max 100000" or "400000 100000"
+        quota, period = (root / "cpu.max").read_text().split()[:2]
+        if quota != "max":
+            n = min(n, max(1, math.ceil(int(quota) / int(period))))
+        return n
+    except (OSError, ValueError):
+        pass
+    try:                                                    # cgroup v1: quota -1 = unlimited
+        quota = int((root / "cpu" / "cpu.cfs_quota_us").read_text())
+        period = int((root / "cpu" / "cpu.cfs_period_us").read_text())
+        if quota > 0 and period > 0:
+            n = min(n, max(1, math.ceil(quota / period)))
+    except (OSError, ValueError):
+        pass
+    return n
+
+
+def configure_threads(num_threads=None) -> int:
+    """Set torch's CPU thread count: train.num_threads if given, else the cores actually available."""
+    n = int(num_threads) if num_threads else available_cpus()
+    torch.set_num_threads(n)
+    return n
 
 
 def pick_device(name: str) -> torch.device:

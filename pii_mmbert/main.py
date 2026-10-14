@@ -18,6 +18,7 @@ from hydra.utils import to_absolute_path
 from omegaconf import DictConfig
 
 from pii_mmbert import baseline_opf, stages
+from pii_mmbert.engine import configure_threads
 
 log = logging.getLogger(__name__)
 
@@ -25,6 +26,7 @@ log = logging.getLogger(__name__)
 @hydra.main(version_base="1.3", config_path="conf", config_name="config")
 def main(cfg: DictConfig) -> None:
     stage = cfg.stage
+    log.info("torch CPU threads: %d", configure_threads(cfg.train.num_threads))
     if stage == "preprocess":
         stages.run_preprocess(cfg, to_absolute_path)
     elif stage == "tune":

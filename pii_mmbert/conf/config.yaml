@@ -38,7 +38,7 @@ train:
   grad_clip: 1.0
   amp: true              # bf16 autocast when running on CUDA
   device: auto           # auto | cpu | cuda
-  num_threads: null      # torch CPU threads (null = torch default)
+  num_threads: null      # torch CPU threads, all stages (null = cores available to this container/cgroup)
   num_workers: 0         # DataLoader worker processes
   log_every: 50          # steps between loss log lines
 
