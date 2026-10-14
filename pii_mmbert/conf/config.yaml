@@ -62,6 +62,7 @@ decode:                  # constrained BIES Viterbi, same bias keys as OPF viter
 eval:
   max_docs: null         # cap on documents scored per evaluation (null = all); a seeded random sample,
                          # identical for every model and baseline evaluated with the same value
+  log_every: 2000        # progress line every N documents during evaluation (0 = off)
 
 tune:
   name: pii_mmbert_tune

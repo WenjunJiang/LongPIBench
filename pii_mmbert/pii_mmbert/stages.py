@@ -12,8 +12,8 @@ from omegaconf import DictConfig, OmegaConf
 from .calibration import Calibrator, expected_calibration_error, fit_calibrator
 from .data import gold_spans, load_or_build, load_windows, subset, windows_dir
 from .decode_search import decode_cache, search_biases
-from .engine import (doc_log_probs, evaluate, pick_device, predict_document, score_prediction, special_ids,
-                     spans_from_path, train)
+from .engine import (Progress, doc_log_probs, evaluate, pick_device, predict_document, score_prediction,
+                     special_ids, spans_from_path, train)
 from .metrics import SpanScorer
 from .model import load_model, save_model
 from .viterbi import ViterbiDecoder
@@ -164,11 +164,8 @@ def run_final(cfg: DictConfig, cli_overrides: list[str], resolve_path) -> dict:
     eval_docs = None if cfg.final.include_val_in_train else data["val"]
     model, metrics = train(cfg, windows, data["space"], eval_docs=eval_docs, eval_prefix="val")
 
+    # Save before the test evaluation, which can take a while, so an interrupted run keeps the model.
     out_dir = Path(resolve_path(cfg.paths.output_dir)) / cfg.final.output_name
-    if cfg.final.eval_on_test:
-        device = pick_device(cfg.train.device)
-        test = evaluate(model, data["test"], data["space"], cfg, device, bos, eos, pad)
-        metrics.update({f"test_{k}": v for k, v in test.items()})
     from transformers import AutoTokenizer
     save_model(model, AutoTokenizer.from_pretrained(cfg.model.name), data["space"], out_dir,
                meta={"base_model": cfg.model.name,
@@ -176,18 +173,27 @@ def run_final(cfg: DictConfig, cli_overrides: list[str], resolve_path) -> dict:
                      "max_length": cfg.data.max_length, "stride": cfg.data.stride})
     (out_dir / "resolved_config.yaml").write_text(OmegaConf.to_yaml(cfg, resolve=True))
     (out_dir / "metrics.json").write_text(json.dumps(_clean(metrics), indent=2))
-    log.info("final metrics: %s", json.dumps(_clean(metrics), indent=2))
     log.info("saved model to %s", out_dir)
+    if cfg.final.eval_on_test:
+        device = pick_device(cfg.train.device)
+        test = evaluate(model, data["test"], data["space"], cfg, device, bos, eos, pad, what="test")
+        metrics.update({f"test_{k}": v for k, v in test.items()})
+        (out_dir / "metrics.json").write_text(json.dumps(_clean(metrics), indent=2))
+    log.info("final metrics: %s", json.dumps(_clean(metrics), indent=2))
     return metrics
 
 
 def _log_prob_cache(model, docs, space, cfg, device, bos, eos, pad, max_docs) -> list[dict]:
     """Run the model once per document and keep what decoding and scoring need."""
     docs = subset(docs, max_docs, int(cfg.seed))
-    return [{"text": row["text"], "offset_start": row["offset_start"], "offset_end": row["offset_end"],
-             "log_probs": doc_log_probs(model, row["input_ids"], space, cfg, device, bos, eos, pad),
-             "gold": set(gold_spans(row))}
-            for row in docs]
+    progress = Progress("calib log-probs", len(docs), cfg.eval.get("log_every", 0))
+    cache = []
+    for row in docs:
+        cache.append({"text": row["text"], "offset_start": row["offset_start"], "offset_end": row["offset_end"],
+                      "log_probs": doc_log_probs(model, row["input_ids"], space, cfg, device, bos, eos, pad),
+                      "gold": set(gold_spans(row))})
+        progress.step()
+    return cache
 
 
 def run_calibrate(cfg, resolve_path) -> dict:
@@ -236,7 +242,9 @@ def run_calibrate(cfg, resolve_path) -> dict:
         base_dec, chosen_dec = ViterbiDecoder(space, base_biases), ViterbiDecoder(space, biases)
         before, with_biases, after = (SpanScorer(space.span_types) for _ in range(3))
         t_records = []
+        progress = Progress("test", len(test), cfg.eval.get("log_every", 0))
         for row in test:
+            progress.step()
             lp = doc_log_probs(model, row["input_ids"], space, run_cfg, device, bos, eos, pad)
             args = (lp, row["text"], row["offset_start"], row["offset_end"], space, trim)
             p_base = spans_from_path(base_dec.decode(lp), *args)

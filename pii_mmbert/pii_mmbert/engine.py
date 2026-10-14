@@ -134,13 +134,32 @@ def predict_document(model, text: str, input_ids, offset_start, offset_end, spac
                            cfg.decode.trim_whitespace)
 
 
-def iter_predictions(model, docs, space: LabelSpace, cfg, device, bos_id, eos_id, pad_id, max_docs=None):
+class Progress:
+    """Logs "<what>: i/n documents, s/doc, ~min left" every `every` documents (0 = never)."""
+
+    def __init__(self, what: str, total: int, every: int):
+        self.what, self.total, self.every = what, total, int(every or 0)
+        self.done, self.t0 = 0, time.time()
+
+    def step(self) -> None:
+        self.done += 1
+        if self.every and (self.done % self.every == 0 or self.done == self.total):
+            rate = (time.time() - self.t0) / self.done
+            log.info("%s: %d/%d documents, %.3f s/doc, ~%.1f min left", self.what, self.done, self.total,
+                     rate, rate * (self.total - self.done) / 60)
+
+
+def iter_predictions(model, docs, space: LabelSpace, cfg, device, bos_id, eos_id, pad_id, max_docs=None,
+                     what: str = "evaluating"):
     """Yield (row, DocPrediction) for a document Dataset (memory-mapped; rows read one at a time)."""
     model.eval()
     decoder = ViterbiDecoder(space, dict(cfg.decode.biases))
-    for row in subset(docs, max_docs, int(cfg.seed)):
+    docs = subset(docs, max_docs, int(cfg.seed))
+    progress = Progress(what, len(docs), cfg.eval.get("log_every", 0))
+    for row in docs:
         yield row, predict_document(model, row["text"], row["input_ids"], row["offset_start"],
                                     row["offset_end"], space, decoder, cfg, device, bos_id, eos_id, pad_id)
+        progress.step()
 
 
 def score_prediction(scorer: SpanScorer, row, pred: DocPrediction, calibrator=None) -> None:
@@ -156,11 +175,11 @@ def score_prediction(scorer: SpanScorer, row, pred: DocPrediction, calibrator=No
     scorer.add(gold_spans(row), spans, row["token_labels"], path)
 
 
-def evaluate(model, docs, space: LabelSpace, cfg, device, bos_id, eos_id, pad_id) -> dict:
+def evaluate(model, docs, space: LabelSpace, cfg, device, bos_id, eos_id, pad_id, what: str = "evaluating") -> dict:
     """Span/token metrics on a document Dataset with the decode biases from cfg."""
     scorer = SpanScorer(space.span_types)
     for row, pred in iter_predictions(model, docs, space, cfg, device, bos_id, eos_id, pad_id,
-                                      cfg.eval.max_docs):
+                                      cfg.eval.max_docs, what=what):
         score_prediction(scorer, row, pred)
     return scorer.result()
 
